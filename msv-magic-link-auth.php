@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.3.0
+ * Version: 0.3.1
  */
 
 if (!defined('ABSPATH')) {
@@ -62,6 +62,11 @@ final class MSV_Magic_Link_Auth {
             'dev_mode' => false,
             'dev_mode_minutes' => 10,
             'turnstile_enabled' => false,
+            'msg_sent' => 'Vérifiez votre boîte mail : nous venons de vous envoyer votre lien de vote.',
+            'msg_invalid' => "Ce lien n'est plus valide. Il a peut-être déjà été utilisé ou a expiré. Merci de demander un nouveau lien ci-dessous.",
+            'msg_rate_limited' => 'Trop de tentatives depuis cette adresse. Merci de réessayer plus tard.',
+            'msg_captcha_failed' => 'La vérification de sécurité a échoué. Merci de réessayer.',
+            'msg_email_required' => 'Merci de saisir une adresse email valide.',
         ];
     }
 
@@ -353,11 +358,12 @@ final class MSV_Magic_Link_Auth {
     }
 
     /**
-     * Prints a dismissible-styled notice for msv_magic_status query-arg
+     * Prints a floating, dismissible toast for msv_magic_status query-arg
      * outcomes (link sent / invalid / rate-limited / etc.) directly on the
      * request page, independently of the [msv_magic_link_form] shortcode -
      * needed because the real site uses a native Elementor form there, which
-     * never renders that shortcode's own message markup.
+     * never renders that shortcode's own message markup. Message text is
+     * editable on the settings page (see the "Messages" section).
      */
     public function render_status_notice(): void {
         if (is_admin() || !isset($_GET['msv_magic_status'])) {
@@ -373,22 +379,55 @@ final class MSV_Magic_Link_Auth {
 
         $status = sanitize_key(wp_unslash($_GET['msv_magic_status']));
         $messages = [
-            'sent' => ['type' => 'success', 'text' => 'Vérifiez votre boîte mail : nous venons de vous envoyer votre lien de vote.'],
-            'invalid' => ['type' => 'error', 'text' => "Ce lien n'est plus valide. Il a peut-être déjà été utilisé ou a expiré. Merci de demander un nouveau lien ci-dessous."],
-            'rate_limited' => ['type' => 'error', 'text' => 'Trop de tentatives depuis cette adresse. Merci de réessayer plus tard.'],
-            'captcha_failed' => ['type' => 'error', 'text' => 'La vérification de sécurité a échoué. Merci de réessayer.'],
-            'email_required' => ['type' => 'error', 'text' => 'Merci de saisir une adresse email valide.'],
+            'sent' => ['type' => 'success', 'text' => $settings['msg_sent']],
+            'invalid' => ['type' => 'error', 'text' => $settings['msg_invalid']],
+            'rate_limited' => ['type' => 'error', 'text' => $settings['msg_rate_limited']],
+            'captcha_failed' => ['type' => 'error', 'text' => $settings['msg_captcha_failed']],
+            'email_required' => ['type' => 'error', 'text' => $settings['msg_email_required']],
         ];
 
-        if (!isset($messages[$status])) {
+        if (!isset($messages[$status]) || $messages[$status]['text'] === '') {
             return;
         }
-
-        printf(
-            '<div class="msv-magic-link-message msv-magic-link-%1$s" role="alert">%2$s</div>',
-            esc_attr($messages[$status]['type']),
-            esc_html($messages[$status]['text'])
-        );
+        ?>
+        <div id="msv-magic-link-toast" class="msv-magic-link-toast msv-magic-link-message msv-magic-link-<?php echo esc_attr($messages[$status]['type']); ?>" role="alert">
+            <button type="button" class="msv-magic-link-toast-close" aria-label="<?php echo esc_attr__('Dismiss', 'msv-magic-link-auth'); ?>" onclick="document.getElementById('msv-magic-link-toast').remove();">&times;</button>
+            <p class="msv-magic-link-toast-text"><?php echo esc_html($messages[$status]['text']); ?></p>
+        </div>
+        <style>
+            .msv-magic-link-toast {
+                position: fixed;
+                right: 24px;
+                bottom: 24px;
+                z-index: 99999;
+                max-width: 420px;
+                padding: 20px 44px 20px 20px;
+                border-radius: 10px;
+                box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+                font-size: 16px;
+                line-height: 1.5;
+            }
+            .msv-magic-link-toast.msv-magic-link-success { background: #e6f4ea; color: #1e4620; }
+            .msv-magic-link-toast.msv-magic-link-error { background: #fce8e6; color: #611a15; }
+            .msv-magic-link-toast-text { margin: 0; }
+            .msv-magic-link-toast-close {
+                position: absolute;
+                top: 8px;
+                right: 10px;
+                background: none;
+                border: none;
+                font-size: 22px;
+                line-height: 1;
+                cursor: pointer;
+                color: inherit;
+                opacity: 0.6;
+            }
+            .msv-magic-link-toast-close:hover { opacity: 1; }
+            @media (max-width: 480px) {
+                .msv-magic-link-toast { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+            }
+        </style>
+        <?php
     }
 
     public function hide_admin_bar_for_non_admins(): void {
@@ -796,6 +835,11 @@ final class MSV_Magic_Link_Auth {
                     'email_from_name' => sanitize_text_field(wp_unslash($_POST['email_from_name'] ?? '')),
                     'email_subject' => sanitize_text_field(wp_unslash($_POST['email_subject'] ?? '')),
                     'turnstile_enabled' => isset($_POST['turnstile_enabled']),
+                    'msg_sent' => sanitize_textarea_field(wp_unslash($_POST['msg_sent'] ?? '')),
+                    'msg_invalid' => sanitize_textarea_field(wp_unslash($_POST['msg_invalid'] ?? '')),
+                    'msg_rate_limited' => sanitize_textarea_field(wp_unslash($_POST['msg_rate_limited'] ?? '')),
+                    'msg_captcha_failed' => sanitize_textarea_field(wp_unslash($_POST['msg_captcha_failed'] ?? '')),
+                    'msg_email_required' => sanitize_textarea_field(wp_unslash($_POST['msg_email_required'] ?? '')),
                 ]);
                 $notice = 'Settings saved.';
             }
@@ -904,6 +948,31 @@ final class MSV_Magic_Link_Auth {
                             <td><input type="password" autocomplete="off" id="secret_key" name="secret_key" class="regular-text" value="<?php echo esc_attr($settings['secret_key']); ?>"></td>
                         </tr>
                     </tbody>
+                </table>
+
+                <h2>Messages</h2>
+                <p class="description">Shown to visitors as a dismissible message in the bottom-right corner of the request page.</p>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="msg_sent">Link sent</label></th>
+                        <td><textarea id="msg_sent" name="msg_sent" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_sent']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_invalid">Link invalid / expired / already used</label></th>
+                        <td><textarea id="msg_invalid" name="msg_invalid" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_invalid']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_rate_limited">Too many attempts</label></th>
+                        <td><textarea id="msg_rate_limited" name="msg_rate_limited" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_rate_limited']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_captcha_failed">Turnstile verification failed</label></th>
+                        <td><textarea id="msg_captcha_failed" name="msg_captcha_failed" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_captcha_failed']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_email_required">Invalid/missing email</label></th>
+                        <td><textarea id="msg_email_required" name="msg_email_required" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_email_required']); ?></textarea></td>
+                    </tr>
                 </table>
             </form>
 
