@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.3.1
+ * Version: 0.3.2
  */
 
 if (!defined('ABSPATH')) {
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class MSV_Magic_Link_Auth {
     private const OPTION_KEY = 'msv_magic_link_auth_settings';
     private const LOG_OPTION_KEY = 'msv_magic_link_auth_log';
-    private const LOG_MAX_ENTRIES = 50;
+    private const LOG_MAX_ENTRIES = 200;
     private const TOKEN_PREFIX = 'msv_magic_token_';
     private const RATE_PREFIX = 'msv_magic_rate_';
     private const NONCE_ACTION = 'msv_magic_request';
@@ -306,6 +306,7 @@ final class MSV_Magic_Link_Auth {
             'created' => time(),
         ];
         set_transient(self::TOKEN_PREFIX . $token, $payload, (int) self::settings()['token_ttl']);
+        $this->log_event('info', 'Magic link issued for ' . $email . ' (token ' . $this->token_fingerprint($token) . ').');
 
         $magic_url = add_query_arg(self::QUERY_VAR, rawurlencode($token), home_url(self::settings()['request_page_path']));
         $this->send_magic_email($user, $magic_url);
@@ -321,13 +322,17 @@ final class MSV_Magic_Link_Auth {
         $token = sanitize_text_field(wp_unslash($_GET[self::QUERY_VAR]));
         $payload = get_transient(self::TOKEN_PREFIX . $token);
         $request_page = $this->current_request_page_url();
+        $fingerprint = $this->token_fingerprint($token);
+        $requester = $this->get_client_ip() . ' / ' . $this->get_user_agent();
 
         if (!is_array($payload) || empty($payload['user_id'])) {
+            $this->log_event('warning', 'Magic link consumption failed (invalid/expired/already used) - token ' . $fingerprint . ', requester ' . $requester . '.');
             wp_safe_redirect(add_query_arg('msv_magic_status', 'invalid', $request_page));
             exit;
         }
 
         delete_transient(self::TOKEN_PREFIX . $token);
+        $this->log_event('info', 'Magic link consumed - token ' . $fingerprint . ', email ' . ($payload['email'] ?? '?') . ', requester ' . $requester . '.');
 
         $user = get_user_by('id', (int) $payload['user_id']);
         if (!$user instanceof WP_User) {
@@ -496,6 +501,21 @@ final class MSV_Magic_Link_Auth {
             }
         }
         return '';
+    }
+
+    /**
+     * Short, non-reversible identifier for a magic-link token, safe to put in
+     * the log (unlike the raw token, which would let anyone reading the log
+     * use it to log in as that voter). Lets an "issued" log line and its
+     * later "consumed"/"consumption failed" line be matched up by eye.
+     */
+    private function token_fingerprint(string $token): string {
+        return substr(hash('sha256', $token), 0, 10);
+    }
+
+    private function get_user_agent(): string {
+        $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'])) : '';
+        return $ua === '' ? '(none)' : substr($ua, 0, 150);
     }
 
     public function is_rate_limited(): bool {
