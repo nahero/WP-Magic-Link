@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.3.2
+ * Version: 0.3.3
  */
 
 if (!defined('ABSPATH')) {
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class MSV_Magic_Link_Auth {
     private const OPTION_KEY = 'msv_magic_link_auth_settings';
     private const LOG_OPTION_KEY = 'msv_magic_link_auth_log';
-    private const LOG_MAX_ENTRIES = 200;
+    private const LOG_HARD_CAP = 5000; // safety ceiling only; normal pruning is time-based, see log_event()
     private const TOKEN_PREFIX = 'msv_magic_token_';
     private const RATE_PREFIX = 'msv_magic_rate_';
     private const NONCE_ACTION = 'msv_magic_request';
@@ -67,6 +67,7 @@ final class MSV_Magic_Link_Auth {
             'msg_rate_limited' => 'Trop de tentatives depuis cette adresse. Merci de réessayer plus tard.',
             'msg_captcha_failed' => 'La vérification de sécurité a échoué. Merci de réessayer.',
             'msg_email_required' => 'Merci de saisir une adresse email valide.',
+            'log_retention_days' => 3,
         ];
     }
 
@@ -87,12 +88,25 @@ final class MSV_Magic_Link_Auth {
         }
 
         array_unshift($log, [
-            'time' => current_time('mysql'),
+            'time' => current_time('mysql'), // display only, respects site timezone
+            'ts' => time(),                  // unambiguous UTC epoch, used for retention below
             'level' => $level,
             'message' => $message,
         ]);
 
-        update_option(self::LOG_OPTION_KEY, array_slice($log, 0, self::LOG_MAX_ENTRIES), false);
+        // Pruned by age (log_retention_days), not just count - during a busy
+        // voting day a fixed entry-count cap could get consumed in an hour
+        // and silently drop same-day history. Entries from before this field
+        // existed have no 'ts' and are treated as already-expired (pruned on
+        // the next write, self-migrating). LOG_HARD_CAP is just a safety
+        // ceiling in case of runaway logging, not the normal eviction path.
+        $retention_days = max(1, (int) self::settings()['log_retention_days']);
+        $cutoff = time() - ($retention_days * DAY_IN_SECONDS);
+        $log = array_values(array_filter($log, static function ($entry) use ($cutoff) {
+            return (int) ($entry['ts'] ?? 0) >= $cutoff;
+        }));
+
+        update_option(self::LOG_OPTION_KEY, array_slice($log, 0, self::LOG_HARD_CAP), false);
     }
 
     public function render_form_shortcode(): string {
@@ -860,6 +874,7 @@ final class MSV_Magic_Link_Auth {
                     'msg_rate_limited' => sanitize_textarea_field(wp_unslash($_POST['msg_rate_limited'] ?? '')),
                     'msg_captcha_failed' => sanitize_textarea_field(wp_unslash($_POST['msg_captcha_failed'] ?? '')),
                     'msg_email_required' => sanitize_textarea_field(wp_unslash($_POST['msg_email_required'] ?? '')),
+                    'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
                 ]);
                 $notice = 'Settings saved.';
             }
@@ -992,6 +1007,14 @@ final class MSV_Magic_Link_Auth {
                     <tr>
                         <th scope="row"><label for="msg_email_required">Invalid/missing email</label></th>
                         <td><textarea id="msg_email_required" name="msg_email_required" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_email_required']); ?></textarea></td>
+                    </tr>
+                </table>
+
+                <h2>Log retention</h2>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="log_retention_days">Keep log entries for (days)</label></th>
+                        <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
                     </tr>
                 </table>
             </form>
