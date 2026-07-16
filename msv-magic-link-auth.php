@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.5.0
+ * Version: 0.5.1
  */
 
 if (!defined('ABSPATH')) {
@@ -42,7 +42,7 @@ final class MSV_Magic_Link_Auth {
         add_action('elementor_pro/forms/actions/register', [$this, 'register_elementor_form_action']);
         add_action('admin_menu', [$this, 'register_settings_page']);
         add_action('wp_body_open', [$this, 'render_status_notice']);
-        add_action('wp_body_open', [$this, 'render_confirm_button']);
+        add_action('wp_footer', [$this, 'render_confirm_button']);
         add_filter('pre_set_site_transient_update_plugins', [$this, 'check_for_update']);
         add_filter('plugins_api', [$this, 'plugins_api_handler'], 10, 3);
     }
@@ -495,16 +495,30 @@ final class MSV_Magic_Link_Auth {
 
     /**
      * Injects the actual confirm button via client-side JS rather than
-     * server-rendered HTML, into #confirmation-container when present
-     * (falling back to appending after <body> otherwise). This is
-     * deliberate: the raw GET response contains no state-changing form at
-     * all, so an email security scanner that only fetches-and-parses HTML
-     * (never executing JS) sees nothing to submit. Only a real browser
-     * running this script, and a real human clicking the resulting button,
-     * ever produces the POST that handle_magic_link_confirm() acts on.
+     * server-rendered HTML, strictly into #confirmation-container on the
+     * configured confirm/landing page - never anywhere else, and never
+     * falls back to dumping content elsewhere if that container isn't
+     * found (logs a warning instead). Hooked on wp_footer, not
+     * wp_body_open: the container needs to already exist in the DOM by
+     * the time this runs, and wp_body_open fires before Elementor has
+     * rendered any page content at all.
+     *
+     * Client-side injection (vs. server-rendered HTML) is deliberate: the
+     * raw GET response contains no state-changing form at all, so an email
+     * security scanner that only fetches-and-parses HTML (never executing
+     * JS) sees nothing to submit. Only a real browser running this script,
+     * and a real human clicking the resulting button, ever produces the
+     * POST that handle_magic_link_confirm() acts on.
      */
     public function render_confirm_button(): void {
         if (is_admin() || !isset($_GET[self::QUERY_VAR])) {
+            return;
+        }
+
+        $settings = self::settings();
+        $landing_path = $settings['confirm_page_path'] !== '' ? $settings['confirm_page_path'] : $settings['request_page_path'];
+
+        if ($this->current_uri_path() !== untrailingslashit($landing_path)) {
             return;
         }
 
@@ -516,11 +530,18 @@ final class MSV_Magic_Link_Auth {
         }
 
         $nonce = wp_create_nonce(self::CONFIRM_NONCE_ACTION);
-        $message = self::settings()['msg_confirm'];
+        $message = $settings['msg_confirm'];
         ?>
         <script>
         (function () {
-            var container = document.getElementById('confirmation-container') || document.body;
+            var container = document.getElementById('confirmation-container');
+            if (!container) {
+                if (window.console) {
+                    console.warn('WP Magic Link Auth: #confirmation-container not found on this page - confirm button not shown.');
+                }
+                return;
+            }
+
             var wrap = document.createElement('div');
             wrap.className = 'msv-magic-link-confirm';
 
