@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.4.1
+ * Version: 0.5.0
  */
 
 if (!defined('ABSPATH')) {
@@ -18,6 +18,7 @@ final class MSV_Magic_Link_Auth {
     private const RATE_PREFIX = 'msv_magic_rate_';
     private const NONCE_ACTION = 'msv_magic_request';
     private const SETTINGS_NONCE_ACTION = 'msv_magic_settings_save';
+    private const CONFIRM_NONCE_ACTION = 'msv_magic_confirm';
     private const SETTINGS_PAGE_SLUG = 'msv-magic-link-auth';
     private const QUERY_VAR = 'msv_magic_token';
     private const GITHUB_OWNER = 'nahero';
@@ -34,12 +35,14 @@ final class MSV_Magic_Link_Auth {
 
         add_shortcode('msv_magic_link_form', [$this, 'render_form_shortcode']);
         add_action('init', [$this, 'handle_form_submission']);
-        add_action('template_redirect', [$this, 'handle_magic_link_login']);
+        add_action('init', [$this, 'handle_magic_link_confirm']);
+        add_action('template_redirect', [$this, 'handle_magic_link_landing']);
         add_action('template_redirect', [$this, 'protect_vote_page'], 1);
         add_action('after_setup_theme', [$this, 'hide_admin_bar_for_non_admins']);
         add_action('elementor_pro/forms/actions/register', [$this, 'register_elementor_form_action']);
         add_action('admin_menu', [$this, 'register_settings_page']);
         add_action('wp_body_open', [$this, 'render_status_notice']);
+        add_action('wp_body_open', [$this, 'render_confirm_button']);
         add_filter('pre_set_site_transient_update_plugins', [$this, 'check_for_update']);
         add_filter('plugins_api', [$this, 'plugins_api_handler'], 10, 3);
     }
@@ -68,6 +71,7 @@ final class MSV_Magic_Link_Auth {
             'msg_rate_limited' => 'Trop de tentatives depuis cette adresse. Merci de réessayer plus tard.',
             'msg_captcha_failed' => 'La vérification de sécurité a échoué. Merci de réessayer.',
             'msg_email_required' => 'Merci de saisir une adresse email valide.',
+            'msg_confirm' => 'Cliquez sur le bouton ci-dessous pour confirmer votre identité et accéder au vote.',
             'log_retention_days' => 3,
         ];
     }
@@ -331,25 +335,62 @@ final class MSV_Magic_Link_Auth {
         return true;
     }
 
-    public function handle_magic_link_login(): void {
+    /**
+     * Handles the GET request from the emailed magic link. This must NEVER
+     * consume the token or log anyone in - corporate email security gateways
+     * (Microsoft Safe Links, Proofpoint, Mimecast, etc.) fetch every link in
+     * an inbound email before the recipient ever sees it, and HTTP GET is
+     * supposed to be side-effect-free, so anything relying on GET alone WILL
+     * get silently consumed by those scanners before the real voter clicks.
+     * This only peeks at validity (redirecting away if already dead) and
+     * otherwise lets the page render normally; render_confirm_button() then
+     * injects a real confirm button whose form POST (handle_magic_link_confirm()
+     * below) is the only thing that actually consumes the token - something
+     * scanners don't do, since they don't execute JS or submit forms.
+     */
+    public function handle_magic_link_landing(): void {
         if (!isset($_GET[self::QUERY_VAR])) {
             return;
         }
 
         $token = sanitize_text_field(wp_unslash($_GET[self::QUERY_VAR]));
         $payload = get_transient(self::TOKEN_PREFIX . $token);
+
+        if (!is_array($payload) || empty($payload['user_id'])) {
+            $this->log_event('warning', 'Magic link landing failed (invalid/expired/already used) - token ' . $this->token_fingerprint($token) . ', requester ' . $this->get_client_ip() . ' / ' . $this->get_user_agent() . '.');
+            wp_safe_redirect(add_query_arg('msv_magic_status', 'invalid', $this->current_request_page_url()));
+            exit;
+        }
+    }
+
+    /**
+     * Handles the confirm button's form POST - the only place a magic-link
+     * token is actually consumed and a session established. See
+     * handle_magic_link_landing() above for why this is split from the GET.
+     */
+    public function handle_magic_link_confirm(): void {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_POST['msv_magic_confirm_token'])) {
+            return;
+        }
+
+        if (!isset($_POST['msv_magic_confirm_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['msv_magic_confirm_nonce'])), self::CONFIRM_NONCE_ACTION)) {
+            wp_die('Invalid request.', 403);
+        }
+
+        $token = sanitize_text_field(wp_unslash($_POST['msv_magic_confirm_token']));
+        $payload = get_transient(self::TOKEN_PREFIX . $token);
         $request_page = $this->current_request_page_url();
         $fingerprint = $this->token_fingerprint($token);
         $requester = $this->get_client_ip() . ' / ' . $this->get_user_agent();
 
         if (!is_array($payload) || empty($payload['user_id'])) {
-            $this->log_event('warning', 'Magic link consumption failed (invalid/expired/already used) - token ' . $fingerprint . ', requester ' . $requester . '.');
+            $this->log_event('warning', 'Magic link confirm failed (invalid/expired/already used) - token ' . $fingerprint . ', requester ' . $requester . '.');
             wp_safe_redirect(add_query_arg('msv_magic_status', 'invalid', $request_page));
             exit;
         }
 
         delete_transient(self::TOKEN_PREFIX . $token);
-        $this->log_event('info', 'Magic link consumed - token ' . $fingerprint . ', email ' . ($payload['email'] ?? '?') . ', requester ' . $requester . '.');
+        $this->log_event('info', 'Magic link confirmed - token ' . $fingerprint . ', email ' . ($payload['email'] ?? '?') . ', requester ' . $requester . '.');
 
         $user = get_user_by('id', (int) $payload['user_id']);
         if (!$user instanceof WP_User) {
@@ -447,6 +488,86 @@ final class MSV_Magic_Link_Auth {
             .msv-magic-link-toast-close:hover { opacity: 1; }
             @media (max-width: 480px) {
                 .msv-magic-link-toast { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+            }
+        </style>
+        <?php
+    }
+
+    /**
+     * Injects the actual confirm button via client-side JS rather than
+     * server-rendered HTML, into #confirmation-container when present
+     * (falling back to appending after <body> otherwise). This is
+     * deliberate: the raw GET response contains no state-changing form at
+     * all, so an email security scanner that only fetches-and-parses HTML
+     * (never executing JS) sees nothing to submit. Only a real browser
+     * running this script, and a real human clicking the resulting button,
+     * ever produces the POST that handle_magic_link_confirm() acts on.
+     */
+    public function render_confirm_button(): void {
+        if (is_admin() || !isset($_GET[self::QUERY_VAR])) {
+            return;
+        }
+
+        $token = sanitize_text_field(wp_unslash($_GET[self::QUERY_VAR]));
+        $payload = get_transient(self::TOKEN_PREFIX . $token); // peek only, never delete here
+
+        if (!is_array($payload) || empty($payload['user_id'])) {
+            return; // handle_magic_link_landing() already redirected this case away
+        }
+
+        $nonce = wp_create_nonce(self::CONFIRM_NONCE_ACTION);
+        $message = self::settings()['msg_confirm'];
+        ?>
+        <script>
+        (function () {
+            var container = document.getElementById('confirmation-container') || document.body;
+            var wrap = document.createElement('div');
+            wrap.className = 'msv-magic-link-confirm';
+
+            var text = document.createElement('p');
+            text.className = 'msv-magic-link-confirm-text';
+            text.textContent = <?php echo wp_json_encode($message); ?>;
+
+            var form = document.createElement('form');
+            form.method = 'post';
+
+            var tokenField = document.createElement('input');
+            tokenField.type = 'hidden';
+            tokenField.name = 'msv_magic_confirm_token';
+            tokenField.value = <?php echo wp_json_encode($token); ?>;
+
+            var nonceField = document.createElement('input');
+            nonceField.type = 'hidden';
+            nonceField.name = 'msv_magic_confirm_nonce';
+            nonceField.value = <?php echo wp_json_encode($nonce); ?>;
+
+            var button = document.createElement('button');
+            button.type = 'submit';
+            button.className = 'msv-magic-link-confirm-button';
+            button.textContent = 'Accéder au vote';
+
+            form.appendChild(tokenField);
+            form.appendChild(nonceField);
+            form.appendChild(button);
+            wrap.appendChild(text);
+            wrap.appendChild(form);
+            container.appendChild(wrap);
+        })();
+        </script>
+        <style>
+            .msv-magic-link-confirm { text-align: center; padding: 24px; }
+            .msv-magic-link-confirm-text { color: #A1A4A5; font-size: 16px; line-height: 1.6; margin: 0 0 20px; }
+            .msv-magic-link-confirm-button {
+                display: inline-block;
+                background: #D4A95E;
+                color: #080E10;
+                border: none;
+                padding: 16px 34px;
+                border-radius: 999px;
+                font-size: 16px;
+                font-weight: 700;
+                cursor: pointer;
+                font-family: Arial, Helvetica, sans-serif;
             }
         </style>
         <?php
@@ -582,7 +703,7 @@ final class MSV_Magic_Link_Auth {
             . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080e10;margin:0;padding:0;"><tr><td align="center" style="padding:48px 20px;">'
             . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;">'
             . '<tr><td align="left" style="padding:0 0 28px;"><img src="' . esc_url($logo_url) . '" alt="' . esc_attr(get_bloginfo('name')) . '" width="200" style="display:block;width:200px;height:auto;"></td></tr>'
-            . '<tr><td style="background-color:#2e3335;border-radius:32px 0px 32px 0px;padding:44px 40px;box-shadow:0 2px 24px rgba(0,0,0,0.8);">'
+            . '<tr><td style="background-color:#2e3335;border:4px solid #d4a95e;border-radius:32px 0px 32px 0px;padding:44px 40px;box-shadow:0 2px 24px rgba(0,0,0,0.8);">'
             . '<h1 style="margin:0 0 20px;font-size:32px;text-transform:uppercase;line-height:1.3;color:#d4a95e;font-weight:400;font-family:Arial,Helvetica,sans-serif;">Votre lien de vote</h1>'
             . '<p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#ffffff;">Bonjour,</p>'
             . '<p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#ffffff;">Cliquez sur le bouton ci-dessous pour accéder au vote. Ce lien est valable 24 heures et ne peut être utilisé qu\'une seule fois.</p>'
@@ -892,6 +1013,7 @@ final class MSV_Magic_Link_Auth {
                     'msg_rate_limited' => sanitize_textarea_field(wp_unslash($_POST['msg_rate_limited'] ?? '')),
                     'msg_captcha_failed' => sanitize_textarea_field(wp_unslash($_POST['msg_captcha_failed'] ?? '')),
                     'msg_email_required' => sanitize_textarea_field(wp_unslash($_POST['msg_email_required'] ?? '')),
+                    'msg_confirm' => sanitize_textarea_field(wp_unslash($_POST['msg_confirm'] ?? '')),
                     'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
                 ]);
                 $notice = 'Settings saved.';
@@ -1032,6 +1154,10 @@ final class MSV_Magic_Link_Auth {
                     <tr>
                         <th scope="row"><label for="msg_email_required">Invalid/missing email</label></th>
                         <td><textarea id="msg_email_required" name="msg_email_required" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_email_required']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_confirm">Confirm-page prompt</label></th>
+                        <td><textarea id="msg_confirm" name="msg_confirm" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_confirm']); ?></textarea></td>
                     </tr>
                 </table>
 
