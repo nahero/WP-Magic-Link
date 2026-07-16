@@ -1,5 +1,10 @@
 /vendor/
+.DS_Store
 /msv-magic-link-auth.zip
 /.claude/
 /.vscode/
 /HANDOFF.md
+/email-template-preview.html
+/MSV-logo-full_v0.svg
+/MSV-logo-full_v0.png
+/Hero-Frame-02.png

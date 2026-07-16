@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.3.3
+ * Version: 0.4.0
  */
 
 if (!defined('ABSPATH')) {
@@ -572,19 +572,28 @@ final class MSV_Magic_Link_Auth {
     private function send_magic_email(WP_User $user, string $magic_url): void {
         $settings = self::settings();
         $subject = $settings['email_subject'];
+        $logo_url = plugins_url('assets/logo.png', __FILE__);
 
-        $message = '<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;color:#111;">'
-            . '<div style="max-width:600px;margin:0 auto;padding:32px 20px;">'
-            . '<div style="background:#ffffff;border-radius:12px;padding:32px;">'
-            . '<h1 style="margin:0 0 16px;font-size:24px;line-height:1.2;">Votre lien de vote</h1>'
-            . '<p style="margin:0 0 16px;font-size:16px;line-height:1.6;">Bonjour,</p>'
-            . '<p style="margin:0 0 24px;font-size:16px;line-height:1.6;">Cliquez sur le bouton ci-dessous pour accéder au vote. Ce lien est valable 24 heures et ne peut être utilisé qu\'une seule fois.</p>'
-            . '<p style="margin:0 0 24px;"><a href="' . esc_url($magic_url) . '" style="display:inline-block;background:#0b57d0;color:#ffffff;text-decoration:none;padding:14px 24px;border-radius:8px;font-weight:700;">Accéder au vote</a></p>'
-            . '<p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#555;">Si le bouton ne fonctionne pas, utilisez ce lien :</p>'
-            . '<p style="margin:0 0 24px;font-size:14px;line-height:1.6;word-break:break-all;"><a href="' . esc_url($magic_url) . '">' . esc_html($magic_url) . '</a></p>'
-            . '<hr style="border:none;border-top:1px solid #e5e5e5;margin:24px 0;">'
-            . '<p style="margin:0;font-size:12px;line-height:1.6;color:#777;">Si vous n\'avez pas demandé ce lien, ignorez cet e-mail.</p>'
-            . '</div></div></body></html>';
+        $message = '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>' . esc_html($subject) . '</title></head>'
+            . '<body style="margin:0;padding:0;background-color:#080e10;font-family:Arial,Helvetica,sans-serif;">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080e10;margin:0;padding:0;"><tr><td align="center" style="padding:48px 20px;">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;">'
+            . '<tr><td align="left" style="padding:0 0 28px;"><img src="' . esc_url($logo_url) . '" alt="' . esc_attr(get_bloginfo('name')) . '" width="200" style="display:block;width:200px;height:auto;"></td></tr>'
+            . '<tr><td style="background-color:#2e3335;border-radius:32px 0px 32px 0px;padding:44px 40px;box-shadow:0 2px 24px rgba(0,0,0,0.8);">'
+            . '<h1 style="margin:0 0 20px;font-size:32px;text-transform:uppercase;line-height:1.3;color:#d4a95e;font-weight:400;font-family:Arial,Helvetica,sans-serif;">Votre lien de vote</h1>'
+            . '<p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#ffffff;">Bonjour,</p>'
+            . '<p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#ffffff;">Cliquez sur le bouton ci-dessous pour accéder au vote. Ce lien est valable 24 heures et ne peut être utilisé qu\'une seule fois.</p>'
+            . '<table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:999px;background-color:#d4a95e;">'
+            . '<a href="' . esc_url($magic_url) . '" style="display:inline-block;padding:16px 34px;font-size:16px;font-weight:700;color:#080e10;text-decoration:none;border-radius:999px;font-family:Arial,Helvetica,sans-serif;">Accéder au vote</a>'
+            . '</td></tr></table>'
+            . '<p style="margin:36px 0 8px;font-size:14px;line-height:1.6;color:#a1a4a5;">Si le bouton ne fonctionne pas, utilisez ce lien :</p>'
+            . '<p style="margin:0 0 32px;font-size:14px;line-height:1.6;word-break:break-all;"><a href="' . esc_url($magic_url) . '" style="color:rgba(161,164,165,0.6);text-decoration:underline;">' . esc_html($magic_url) . '</a></p>'
+            . '<hr style="border:none;border-top:1px solid rgba(161,164,165,0.25);margin:0 0 20px;">'
+            . '<p style="margin:0;font-size:12px;line-height:1.6;color:#a1a4a5;">Si vous n\'avez pas demandé ce lien, ignorez cet e-mail.</p>'
+            . '</td></tr>'
+            . '</table>'
+            . '</td></tr></table>'
+            . '</body></html>';
 
         add_filter('wp_mail_content_type', [$this, 'set_html_mail_content_type']);
         add_filter('wp_mail_from_name', [$this, 'filter_mail_from_name']);
