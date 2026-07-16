@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.5.1
+ * Version: 0.5.2
  */
 
 if (!defined('ABSPATH')) {
@@ -861,8 +861,18 @@ final class MSV_Magic_Link_Auth {
     }
 
     public function check_for_update($transient) {
-        if (empty($transient->checked)) {
-            return $transient;
+        // Deliberately NOT bailing out when $transient->checked is empty -
+        // this filter also fires when WP core resets the transient to a
+        // bare object to force a recheck, and checked isn't populated yet
+        // at that point. Bailing there would return the transient
+        // unmodified, and that incomplete state gets cached, producing
+        // exactly the "list page says update available, but Update Now
+        // says already at latest version" contradiction (both just read
+        // whatever's currently cached; neither forces a fresh check).
+        // get_installed_version() is a fully reliable source on its own,
+        // so there's no need to depend on WP's own bookkeeping here.
+        if (!is_object($transient)) {
+            $transient = new stdClass();
         }
 
         $plugin_file = plugin_basename(__FILE__);
@@ -871,7 +881,7 @@ final class MSV_Magic_Link_Auth {
             return $transient;
         }
 
-        $installed = $transient->checked[$plugin_file] ?? self::get_installed_version();
+        $installed = self::get_installed_version();
 
         if (version_compare($release['tag_name'], $installed, '>')) {
             $item = new stdClass();
