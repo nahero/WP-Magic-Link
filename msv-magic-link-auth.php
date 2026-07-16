@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.4.0
+ * Version: 0.4.1
  */
 
 if (!defined('ABSPATH')) {
@@ -53,6 +53,7 @@ final class MSV_Magic_Link_Auth {
             'site_key' => '',
             'secret_key' => '',
             'request_page_path' => '/accueil-votez',
+            'confirm_page_path' => '',
             'vote_page_path' => '/votez',
             'future_request_page_path' => '/',
             'token_ttl' => DAY_IN_SECONDS,
@@ -322,7 +323,9 @@ final class MSV_Magic_Link_Auth {
         set_transient(self::TOKEN_PREFIX . $token, $payload, (int) self::settings()['token_ttl']);
         $this->log_event('info', 'Magic link issued for ' . $email . ' (token ' . $this->token_fingerprint($token) . ').');
 
-        $magic_url = add_query_arg(self::QUERY_VAR, rawurlencode($token), home_url(self::settings()['request_page_path']));
+        $settings = self::settings();
+        $landing_path = $settings['confirm_page_path'] !== '' ? $settings['confirm_page_path'] : $settings['request_page_path'];
+        $magic_url = add_query_arg(self::QUERY_VAR, rawurlencode($token), home_url($landing_path));
         $this->send_magic_email($user, $magic_url);
 
         return true;
@@ -866,10 +869,16 @@ final class MSV_Magic_Link_Auth {
                 delete_option(self::LOG_OPTION_KEY);
                 $notice = 'Log cleared.';
             } else {
+                // Empty means "not configured, fall back to request_page_path" -
+                // distinct from sanitize_path()'s own empty-input behavior,
+                // which would turn it into "/" (the home page).
+                $confirm_page_path_raw = trim(sanitize_text_field(wp_unslash($_POST['confirm_page_path'] ?? '')));
+
                 update_option(self::OPTION_KEY, [
                     'site_key' => sanitize_text_field(wp_unslash($_POST['site_key'] ?? '')),
                     'secret_key' => sanitize_text_field(wp_unslash($_POST['secret_key'] ?? '')),
                     'request_page_path' => $this->sanitize_path(wp_unslash($_POST['request_page_path'] ?? '')),
+                    'confirm_page_path' => $confirm_page_path_raw === '' ? '' : $this->sanitize_path($confirm_page_path_raw),
                     'vote_page_path' => $this->sanitize_path(wp_unslash($_POST['vote_page_path'] ?? '')),
                     'max_attempts_per_hour' => max(1, absint($_POST['max_attempts_per_hour'] ?? 3)),
                     'token_ttl' => max(1, absint($_POST['token_ttl_hours'] ?? 24)) * HOUR_IN_SECONDS,
@@ -929,6 +938,13 @@ final class MSV_Magic_Link_Auth {
                     <tr>
                         <th scope="row"><label for="request_page_path">Request page path</label></th>
                         <td><input type="text" id="request_page_path" name="request_page_path" class="regular-text" value="<?php echo esc_attr($settings['request_page_path']); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="confirm_page_path">Vote confirmation page path</label></th>
+                        <td>
+                            <input type="text" id="confirm_page_path" name="confirm_page_path" class="regular-text" placeholder="<?php echo esc_attr($settings['request_page_path']); ?>" value="<?php echo esc_attr($settings['confirm_page_path']); ?>">
+                            <p class="description">Where the emailed magic link itself points to. Leave blank to use the request page path above.</p>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="vote_page_path">Vote page path</label></th>
