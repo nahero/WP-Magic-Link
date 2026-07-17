@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.5.2
+ * Version: 0.6.0
  */
 
 if (!defined('ABSPATH')) {
@@ -27,6 +27,8 @@ final class MSV_Magic_Link_Auth {
     private const UPDATE_RELEASE_CACHE_KEY = 'msv_magic_link_auth_gh_release';
     private const UPDATE_RELEASE_CACHE_TTL = 6 * HOUR_IN_SECONDS;
     private const UPDATE_RELEASE_NEGATIVE_TTL = 5 * MINUTE_IN_SECONDS;
+    private const DISPOSABLE_OPTION_KEY = 'msv_magic_link_auth_disposable';
+    private const DISPOSABLE_BLOCKLIST_URL = 'https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/main/disposable_email_blocklist.conf';
 
     private static ?self $instance = null;
 
@@ -72,6 +74,9 @@ final class MSV_Magic_Link_Auth {
             'msg_captcha_failed' => 'La vérification de sécurité a échoué. Merci de réessayer.',
             'msg_email_required' => 'Merci de saisir une adresse email valide.',
             'msg_confirm' => 'Cliquez sur le bouton ci-dessous pour confirmer votre identité et accéder au vote.',
+            'msg_disposable' => "Les adresses e-mail jetables ne sont pas autorisées. Merci d'utiliser une adresse personnelle.",
+            'custom_disposable_domains' => '',
+            'disposable_allowlist' => '',
             'log_retention_days' => 3,
         ];
     }
@@ -131,6 +136,8 @@ final class MSV_Magic_Link_Auth {
                 $error = 'Turnstile verification failed. Please try again.';
             } elseif ($status === 'email_required') {
                 $error = 'Please enter a valid email address.';
+            } elseif ($status === 'disposable') {
+                $error = 'Disposable email addresses are not allowed.';
             }
         }
 
@@ -185,6 +192,13 @@ final class MSV_Magic_Link_Auth {
             wp_safe_redirect(add_query_arg('msv_magic_status', 'email_required', $redirect_url));
             exit;
         }
+        $email = $this->normalize_email($email);
+
+        if ($this->is_disposable_email($email)) {
+            $this->log_event('warning', 'Blocked disposable email domain: ' . substr($email, strrpos($email, '@') + 1));
+            wp_safe_redirect(add_query_arg('msv_magic_status', 'disposable', $redirect_url));
+            exit;
+        }
 
         if ($this->is_rate_limited()) {
             wp_safe_redirect(add_query_arg('msv_magic_status', 'rate_limited', $redirect_url));
@@ -227,6 +241,13 @@ final class MSV_Magic_Link_Auth {
 
         if (!$email || !is_email($email)) {
             $ajax_handler->add_error_message('Please enter a valid email address.');
+            return;
+        }
+        $email = $this->normalize_email($email);
+
+        if ($this->is_disposable_email($email)) {
+            $this->log_event('warning', 'Blocked disposable email domain: ' . substr($email, strrpos($email, '@') + 1));
+            $ajax_handler->add_error_message(self::settings()['msg_disposable']);
             return;
         }
 
@@ -299,6 +320,7 @@ final class MSV_Magic_Link_Auth {
      * @return true|WP_Error
      */
     public function issue_magic_link(string $email) {
+        $email = $this->normalize_email($email);
         $user = get_user_by('email', $email);
         if (!$user) {
             $username = $this->generate_unique_username_from_email($email);
@@ -447,6 +469,7 @@ final class MSV_Magic_Link_Auth {
             'rate_limited' => ['type' => 'error', 'text' => $settings['msg_rate_limited']],
             'captcha_failed' => ['type' => 'error', 'text' => $settings['msg_captcha_failed']],
             'email_required' => ['type' => 'error', 'text' => $settings['msg_email_required']],
+            'disposable' => ['type' => 'error', 'text' => $settings['msg_disposable']],
         ];
 
         if (!isset($messages[$status]) || $messages[$status]['text'] === '') {
@@ -698,6 +721,114 @@ final class MSV_Magic_Link_Auth {
         set_transient($key, $count + 1, HOUR_IN_SECONDS);
     }
 
+    /**
+     * Collapses address variants to one canonical account: strips a
+     * "+suffix" from the local part for any domain (subaddressing - the
+     * base address is always the real deliverable inbox), and additionally
+     * strips dots from the local part for Gmail/Googlemail specifically
+     * (Gmail ignores dots; other providers treat them as significant, so
+     * this is NOT applied generally). Defeats the voter+1@gmail.com /
+     * voter+2@gmail.com / v.o.t.e.r@gmail.com multi-account trick.
+     */
+    private function normalize_email(string $email): string {
+        $email = strtolower(trim($email));
+        $at = strrpos($email, '@');
+        if ($at === false) {
+            return $email;
+        }
+
+        $local = substr($email, 0, $at);
+        $domain = substr($email, $at + 1);
+
+        $plus = strpos($local, '+');
+        if ($plus !== false) {
+            $local = substr($local, 0, $plus);
+        }
+
+        if ($domain === 'gmail.com' || $domain === 'googlemail.com') {
+            $local = str_replace('.', '', $local);
+        }
+
+        return $local . '@' . $domain;
+    }
+
+    /**
+     * Builds the effective disposable-domain lookup set: the refreshed
+     * list (see refresh_disposable_list_from_source()) if one has ever
+     * been fetched, else the bundled snapshot shipped with the plugin -
+     * minus the admin's own allowlist, plus the admin's own custom
+     * blocklist. Returns a domain => true map for O(1) isset() lookups.
+     * Static-cached per request since this can be checked multiple times
+     * (e.g. shortcode + Elementor paths are mutually exclusive per
+     * request, but issue_magic_link() may also be called directly).
+     */
+    private function get_disposable_domains(): array {
+        static $domains = null;
+        if ($domains !== null) {
+            return $domains;
+        }
+
+        $refreshed = get_option(self::DISPOSABLE_OPTION_KEY, []);
+        if (is_array($refreshed) && !empty($refreshed['domains'])) {
+            $list = $refreshed['domains'];
+        } else {
+            $bundled = @file_get_contents(__DIR__ . '/assets/disposable-domains.txt');
+            $list = $bundled !== false ? preg_split('/\r\n|\r|\n/', $bundled) : [];
+        }
+
+        $settings = self::settings();
+        $custom = $this->parse_domain_list($settings['custom_disposable_domains']);
+        $allow = $this->parse_domain_list($settings['disposable_allowlist']);
+
+        $domains = array_fill_keys(array_diff(array_merge((array) $list, $custom), $allow), true);
+
+        return $domains;
+    }
+
+    /**
+     * Splits a textarea's newline-separated domains into a clean lowercase
+     * array, dropping blanks and #-comments. Shared by the custom-blocklist
+     * and allowlist settings fields.
+     */
+    private function parse_domain_list(string $raw): array {
+        $lines = preg_split('/\r\n|\r|\n/', $raw);
+        $domains = [];
+        foreach ($lines as $line) {
+            $line = strtolower(trim($line));
+            if ($line === '' || $line[0] === '#') {
+                continue;
+            }
+            $domains[] = $line;
+        }
+        return $domains;
+    }
+
+    /**
+     * Fails open: an empty/unavailable list means every email is allowed.
+     * Never block a legitimate voter because a list failed to load.
+     */
+    private function is_disposable_email(string $email): bool {
+        $at = strrpos($email, '@');
+        if ($at === false) {
+            return false;
+        }
+
+        $domains = $this->get_disposable_domains();
+        if (empty($domains)) {
+            return false;
+        }
+
+        $labels = explode('.', strtolower(substr($email, $at + 1)));
+        while (count($labels) >= 2) {
+            if (isset($domains[implode('.', $labels)])) {
+                return true;
+            }
+            array_shift($labels);
+        }
+
+        return false;
+    }
+
     private function generate_unique_username_from_email(string $email): string {
         $base = sanitize_user(current(explode('@', $email)), true);
         if ($base === '') {
@@ -860,6 +991,58 @@ final class MSV_Magic_Link_Auth {
         return $release;
     }
 
+    /**
+     * Self-service refresh of the disposable-domain list, for whoever runs
+     * the election after this plugin is handed off - the developer may not
+     * be involved by then, so this can't require a code change. Fetches the
+     * source list fresh and stores it in DISPOSABLE_OPTION_KEY (autoload
+     * false); a failed fetch NEVER wipes the currently active list, it just
+     * leaves it as-is and reports the error.
+     *
+     * @return array{count:int}|WP_Error
+     */
+    public function refresh_disposable_list_from_source() {
+        $response = wp_remote_get(self::DISPOSABLE_BLOCKLIST_URL, ['timeout' => 20]);
+
+        if (is_wp_error($response)) {
+            $this->log_event('error', 'Disposable-domain list refresh failed: ' . $response->get_error_message());
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+
+        if ($code !== 200 || trim($body) === '') {
+            $error = new WP_Error('msv_magic_link_disposable_http', 'Disposable-domain list refresh returned HTTP ' . $code . '.');
+            $this->log_event('error', $error->get_error_message());
+            return $error;
+        }
+
+        $domains = [];
+        foreach (preg_split('/\r\n|\r|\n/', $body) as $line) {
+            $line = strtolower(trim($line));
+            if ($line !== '' && $line[0] !== '#') {
+                $domains[] = $line;
+            }
+        }
+
+        if (empty($domains)) {
+            $error = new WP_Error('msv_magic_link_disposable_empty', 'Disposable-domain list refresh returned no domains.');
+            $this->log_event('error', $error->get_error_message());
+            return $error;
+        }
+
+        update_option(self::DISPOSABLE_OPTION_KEY, [
+            'domains' => $domains,
+            'count' => count($domains),
+            'refreshed' => time(),
+        ], false);
+
+        $this->log_event('info', 'Disposable-domain list refreshed: ' . count($domains) . ' domains.');
+
+        return ['count' => count($domains)];
+    }
+
     public function check_for_update($transient) {
         // Deliberately NOT bailing out when $transient->checked is empty -
         // this filter also fires when WP core resets the transient to a
@@ -1011,6 +1194,7 @@ final class MSV_Magic_Link_Auth {
         }
 
         $notice = '';
+        $error_notice = '';
 
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!isset($_POST['msv_magic_settings_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['msv_magic_settings_nonce'])), self::SETTINGS_NONCE_ACTION)) {
@@ -1020,6 +1204,13 @@ final class MSV_Magic_Link_Auth {
             if (isset($_POST['msv_magic_clear_log'])) {
                 delete_option(self::LOG_OPTION_KEY);
                 $notice = 'Log cleared.';
+            } elseif (isset($_POST['msv_magic_refresh_disposable'])) {
+                $result = $this->refresh_disposable_list_from_source();
+                if (is_wp_error($result)) {
+                    $error_notice = 'Could not refresh the list: ' . $result->get_error_message() . ' The current list was left unchanged.';
+                } else {
+                    $notice = 'Disposable-domain list refreshed: ' . (int) $result['count'] . ' domains.';
+                }
             } else {
                 // Empty means "not configured, fall back to request_page_path" -
                 // distinct from sanitize_path()'s own empty-input behavior,
@@ -1045,6 +1236,9 @@ final class MSV_Magic_Link_Auth {
                     'msg_captcha_failed' => sanitize_textarea_field(wp_unslash($_POST['msg_captcha_failed'] ?? '')),
                     'msg_email_required' => sanitize_textarea_field(wp_unslash($_POST['msg_email_required'] ?? '')),
                     'msg_confirm' => sanitize_textarea_field(wp_unslash($_POST['msg_confirm'] ?? '')),
+                    'msg_disposable' => sanitize_textarea_field(wp_unslash($_POST['msg_disposable'] ?? '')),
+                    'custom_disposable_domains' => sanitize_textarea_field(wp_unslash($_POST['custom_disposable_domains'] ?? '')),
+                    'disposable_allowlist' => sanitize_textarea_field(wp_unslash($_POST['disposable_allowlist'] ?? '')),
                     'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
                 ]);
                 $notice = 'Settings saved.';
@@ -1067,6 +1261,9 @@ final class MSV_Magic_Link_Auth {
             <p>Developed by igor@igibits.com</p>
             <?php if ($notice): ?>
                 <div class="notice notice-success is-dismissible"><p><?php echo esc_html($notice); ?></p></div>
+            <?php endif; ?>
+            <?php if ($error_notice): ?>
+                <div class="notice notice-error is-dismissible"><p><?php echo esc_html($error_notice); ?></p></div>
             <?php endif; ?>
             <?php if (!empty($settings['dev_mode'])): ?>
                 <div class="notice notice-warning"><p><strong>Development mode is ON</strong> — magic links expire after <?php echo esc_html((string) max(1, absint($settings['dev_mode_minutes']))); ?> minute(s) regardless of the setting below. Turn this off before the real election.</p></div>
@@ -1189,6 +1386,44 @@ final class MSV_Magic_Link_Auth {
                     <tr>
                         <th scope="row"><label for="msg_confirm">Confirm-page prompt</label></th>
                         <td><textarea id="msg_confirm" name="msg_confirm" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_confirm']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="msg_disposable">Disposable email rejected</label></th>
+                        <td><textarea id="msg_disposable" name="msg_disposable" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_disposable']); ?></textarea></td>
+                    </tr>
+                </table>
+
+                <h2>Disposable email blocklist</h2>
+                <p class="description">
+                    Blocks known throwaway email services (Mailinator, temp-mail, etc.) from requesting a magic link, so one person can't vote multiple times using disposable inboxes.
+                    The plugin ships with a snapshot of a public blocklist. New disposable services appear constantly, so <strong>refresh this list shortly before voting opens</strong> to get the most current version — you don't need the developer for this, just click the button below.
+                </p>
+                <?php $disposable_status = get_option(self::DISPOSABLE_OPTION_KEY, []); ?>
+                <p>
+                    <?php if (is_array($disposable_status) && !empty($disposable_status['count'])): ?>
+                        <strong><?php echo esc_html((string) $disposable_status['count']); ?> domains loaded</strong> — last refreshed <?php echo esc_html(wp_date('Y-m-d H:i', (int) ($disposable_status['refreshed'] ?? 0))); ?>.
+                    <?php else: ?>
+                        Using the snapshot bundled with the plugin (never refreshed since install).
+                    <?php endif; ?>
+                </p>
+                <p>
+                    <?php submit_button('Refresh list now', 'secondary', 'msv_magic_refresh_disposable', false); ?>
+                </p>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="custom_disposable_domains">Additional domains to block</label></th>
+                        <td>
+                            <textarea id="custom_disposable_domains" name="custom_disposable_domains" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['custom_disposable_domains']); ?></textarea>
+                            <p class="description">Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren't on the public list yet.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="disposable_allowlist">Never block these domains</label></th>
+                        <td>
+                            <textarea id="disposable_allowlist" name="disposable_allowlist" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['disposable_allowlist']); ?></textarea>
+                            <p class="description">Use this if a legitimate domain ever gets wrongly blocked.</p>
+                        </td>
                     </tr>
                 </table>
 
