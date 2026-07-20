@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.7.0
+ * Version: 0.8.0
  * Requires at least: 6.0
  * Requires PHP: 8.4
  * Text Domain: msv-magic-link-auth
@@ -87,6 +87,8 @@ final class MSV_Magic_Link_Auth {
             'custom_disposable_domains' => '',
             'disposable_allowlist' => '',
             'log_retention_days' => 3,
+            'totalpoll_table_suffix' => 'totalpoll_log',
+            'totalpoll_ip_column' => 'ip',
         ];
     }
 
@@ -1340,6 +1342,80 @@ final class MSV_Magic_Link_Auth {
         return $dropdown;
     }
 
+    /**
+     * Locates TotalPoll Pro's raw vote-log table (holds voter IP + user
+     * agent per vote action, separate from the aggregate vote-count table).
+     * The table prefix always comes from $wpdb->prefix - never hardcoded -
+     * since hosts vary (e.g. Infomaniak's own wp_<siteid>_ style prefixes).
+     * Verifies both the table AND the IP column actually exist before ever
+     * offering the clear-IPs action, so this degrades gracefully (and
+     * visibly, via the settings-page status line) on any site where
+     * TotalPoll isn't installed, isn't Pro, or has a differently-named
+     * table/column - never guesses, never silently no-ops.
+     */
+    private function get_totalpoll_log_table(string $suffix, string $ip_column): ?string {
+        global $wpdb;
+
+        $suffix = preg_replace('/[^a-zA-Z0-9_]/', '', $suffix);
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $ip_column);
+        if ($suffix === '' || $column === '') {
+            return null;
+        }
+
+        $table = $wpdb->prefix . $suffix;
+
+        $found_table = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($found_table !== $table) {
+            return null;
+        }
+
+        // $table is safe to interpolate here: built from $wpdb->prefix (WP
+        // core, trusted) plus $suffix, which was stripped above to
+        // [a-zA-Z0-9_] only - $wpdb->prepare() can't parameterize identifiers,
+        // only values, so this is the standard WordPress pattern for a
+        // dynamic-but-sanitized table/column name.
+        $found_column = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM `$table` LIKE %s", $column));
+        if ($found_column === null) {
+            return null;
+        }
+
+        return $table;
+    }
+
+    private function count_totalpoll_ips(string $table, string $ip_column): int {
+        global $wpdb;
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $ip_column);
+        return (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table` WHERE `$column` IS NOT NULL AND `$column` != ''");
+    }
+
+    /**
+     * Nulls out (never deletes) the IP column on every row of TotalPoll's
+     * vote-log table. Rows are kept intentionally: TotalPoll's own
+     * one-vote-per-user enforcement counts rows in this same table by
+     * user_id, so deleting rows outright could let a repeat vote go
+     * undetected later. Vote counts/results live entirely in a separate
+     * aggregate table with no personal data at all, so this has zero
+     * effect on results either way.
+     *
+     * @return int|WP_Error Number of rows affected, or WP_Error on failure.
+     */
+    public function clear_totalpoll_ips(string $table, string $ip_column) {
+        global $wpdb;
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $ip_column);
+
+        $affected = $wpdb->query("UPDATE `$table` SET `$column` = NULL WHERE `$column` IS NOT NULL");
+
+        if ($affected === false) {
+            $message = $wpdb->last_error !== '' ? $wpdb->last_error : 'Unknown database error.';
+            $this->log_event('error', 'TotalPoll IP clear failed: ' . $message);
+            return new WP_Error('msv_magic_link_totalpoll_clear_failed', $message);
+        }
+
+        $this->log_event('info', 'TotalPoll voter IPs cleared: ' . (int) $affected . ' row(s) in ' . $table . '.');
+
+        return (int) $affected;
+    }
+
     public function render_settings_page(): void {
         if (!current_user_can('manage_options')) {
             return;
@@ -1366,6 +1442,30 @@ final class MSV_Magic_Link_Auth {
                     /* translators: %d: number of domains loaded */
                     $notice = sprintf(__('Disposable-domain list refreshed: %d domains.', 'msv-magic-link-auth'), (int) $result['count']);
                 }
+            } elseif (isset($_POST['msv_magic_clear_totalpoll_ips'])) {
+                $tp_suffix = sanitize_text_field(wp_unslash($_POST['totalpoll_table_suffix'] ?? 'totalpoll_log'));
+                $tp_column = sanitize_text_field(wp_unslash($_POST['totalpoll_ip_column'] ?? 'ip'));
+                $tp_table = $this->get_totalpoll_log_table($tp_suffix, $tp_column);
+
+                if ($tp_table === null) {
+                    $error_notice = __('Could not find that table/column - nothing was changed. Check the table name and column name below.', 'msv-magic-link-auth');
+                } else {
+                    $tp_result = $this->clear_totalpoll_ips($tp_table, $tp_column);
+                    if (is_wp_error($tp_result)) {
+                        /* translators: %s: error message */
+                        $error_notice = sprintf(__('Could not clear IPs: %s', 'msv-magic-link-auth'), $tp_result->get_error_message());
+                    } else {
+                        /* translators: %d: number of rows affected */
+                        $notice = sprintf(__('Cleared the IP address from %d TotalPoll log entries.', 'msv-magic-link-auth'), $tp_result);
+                    }
+                }
+
+                // Persist the (possibly just-adjusted) table/column names for
+                // next time, regardless of whether the clear itself succeeded.
+                $existing_for_tp = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaults());
+                $existing_for_tp['totalpoll_table_suffix'] = $tp_suffix;
+                $existing_for_tp['totalpoll_ip_column'] = $tp_column;
+                update_option(self::OPTION_KEY, $existing_for_tp);
             } else {
                 // Existing stored values, used as the fallback whenever a field
                 // is absent from $_POST - this happens legitimately for any
@@ -1419,6 +1519,8 @@ final class MSV_Magic_Link_Auth {
                     'custom_disposable_domains' => sanitize_textarea_field(wp_unslash($_POST['custom_disposable_domains'] ?? '')),
                     'disposable_allowlist' => sanitize_textarea_field(wp_unslash($_POST['disposable_allowlist'] ?? '')),
                     'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
+                    'totalpoll_table_suffix' => sanitize_text_field(wp_unslash($_POST['totalpoll_table_suffix'] ?? 'totalpoll_log')),
+                    'totalpoll_ip_column' => sanitize_text_field(wp_unslash($_POST['totalpoll_ip_column'] ?? 'ip')),
                 ]);
                 $notice = __('Settings saved.', 'msv-magic-link-auth');
             }
@@ -1661,6 +1763,50 @@ final class MSV_Magic_Link_Auth {
                             <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
                         </tr>
                     </table>
+
+                    <hr>
+                    <h2><?php esc_html_e('TotalPoll voter IP cleanup', 'msv-magic-link-auth'); ?></h2>
+                    <p class="description">
+                        <?php esc_html_e('TotalPoll Pro logs each voter\'s IP address alongside every vote. This clears just the IP address from that log after voting closes. Vote counts and results are stored in a completely separate table with no personal data and are never affected.', 'msv-magic-link-auth'); ?>
+                    </p>
+                    <?php
+                    $totalpoll_table = $this->get_totalpoll_log_table($settings['totalpoll_table_suffix'], $settings['totalpoll_ip_column']);
+                    ?>
+                    <p>
+                        <?php if ($totalpoll_table !== null): ?>
+                            <?php
+                            printf(
+                                /* translators: 1: database table name, 2: number of rows currently storing an IP address */
+                                esc_html__('Detected table %1$s — %2$d entries currently store an IP address.', 'msv-magic-link-auth'),
+                                '<code>' . esc_html($totalpoll_table) . '</code>',
+                                (int) $this->count_totalpoll_ips($totalpoll_table, $settings['totalpoll_ip_column'])
+                            );
+                            ?>
+                        <?php else: ?>
+                            <?php esc_html_e('No matching table/column found - TotalPoll Pro may not be installed, or uses a different table/column name. The button below is disabled until a match is found.', 'msv-magic-link-auth'); ?>
+                        <?php endif; ?>
+                    </p>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="totalpoll_table_suffix"><?php esc_html_e('TotalPoll log table (without your site\'s table prefix)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="text" id="totalpoll_table_suffix" name="totalpoll_table_suffix" class="regular-text" value="<?php echo esc_attr($settings['totalpoll_table_suffix']); ?>"></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="totalpoll_ip_column"><?php esc_html_e('IP column name', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="text" id="totalpoll_ip_column" name="totalpoll_ip_column" class="regular-text" value="<?php echo esc_attr($settings['totalpoll_ip_column']); ?>"></td>
+                        </tr>
+                    </table>
+                    <p>
+                        <button
+                            type="submit"
+                            name="msv_magic_clear_totalpoll_ips"
+                            value="1"
+                            form="msv-settings-form"
+                            class="button"
+                            <?php echo $totalpoll_table === null ? 'disabled' : ''; ?>
+                            onclick="return confirm(<?php echo esc_attr(wp_json_encode(__('This will permanently clear all voter IP addresses from the TotalPoll log. This cannot be undone. Only do this after voting has fully closed. Continue?', 'msv-magic-link-auth'))); ?>);"
+                        ><?php esc_html_e('Clear TotalPoll voter IPs now', 'msv-magic-link-auth'); ?></button>
+                    </p>
                 </div>
             </form>
 
