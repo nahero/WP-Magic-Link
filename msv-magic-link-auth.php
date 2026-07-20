@@ -1,9 +1,13 @@
 <?php
 /**
  * Plugin Name: WP Magic Link Auth
- * Description: Custom magic-link auth flow for MSV voting with Cloudflare Turnstile, rate limiting, and protected vote page. Supports both the [msv_magic_link_form] shortcode and an Elementor Pro form action.
+ * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.6.0
+ * Version: 0.7.0
+ * Requires at least: 6.0
+ * Requires PHP: 8.4
+ * Text Domain: msv-magic-link-auth
+ * Domain Path: /languages
  */
 
 if (!defined('ABSPATH')) {
@@ -35,6 +39,7 @@ final class MSV_Magic_Link_Auth {
     public function __construct() {
         self::$instance = $this;
 
+        add_action('init', [$this, 'load_textdomain']);
         add_shortcode('msv_magic_link_form', [$this, 'render_form_shortcode']);
         add_action('init', [$this, 'handle_form_submission']);
         add_action('init', [$this, 'handle_magic_link_confirm']);
@@ -53,28 +58,32 @@ final class MSV_Magic_Link_Auth {
         return self::$instance;
     }
 
+    public function load_textdomain(): void {
+        load_plugin_textdomain('msv-magic-link-auth', false, dirname(plugin_basename(__FILE__)) . '/languages');
+    }
+
     public static function defaults(): array {
         return [
             'site_key' => '',
             'secret_key' => '',
-            'request_page_path' => '/accueil-votez',
+            'request_page_path' => '',
             'confirm_page_path' => '',
-            'vote_page_path' => '/votez',
+            'vote_page_path' => '',
             'future_request_page_path' => '/',
             'token_ttl' => DAY_IN_SECONDS,
             'max_attempts_per_hour' => 3,
             'email_from_name' => get_bloginfo('name'),
-            'email_subject' => 'Votre lien de vote',
+            'email_subject' => __('Your magic link', 'msv-magic-link-auth'),
             'dev_mode' => false,
             'dev_mode_minutes' => 10,
             'turnstile_enabled' => false,
-            'msg_sent' => 'Vérifiez votre boîte mail : nous venons de vous envoyer votre lien de vote.',
-            'msg_invalid' => "Ce lien n'est plus valide. Il a peut-être déjà été utilisé ou a expiré. Merci de demander un nouveau lien ci-dessous.",
-            'msg_rate_limited' => 'Trop de tentatives depuis cette adresse. Merci de réessayer plus tard.',
-            'msg_captcha_failed' => 'La vérification de sécurité a échoué. Merci de réessayer.',
-            'msg_email_required' => 'Merci de saisir une adresse email valide.',
-            'msg_confirm' => 'Cliquez sur le bouton ci-dessous pour confirmer votre identité et accéder au vote.',
-            'msg_disposable' => "Les adresses e-mail jetables ne sont pas autorisées. Merci d'utiliser une adresse personnelle.",
+            'msg_sent' => __('Check your email: we just sent you your magic link.', 'msv-magic-link-auth'),
+            'msg_invalid' => __('This link is no longer valid. It may have already been used or expired. Please request a new one below.', 'msv-magic-link-auth'),
+            'msg_rate_limited' => __('Too many attempts from this address. Please try again later.', 'msv-magic-link-auth'),
+            'msg_captcha_failed' => __('Security verification failed. Please try again.', 'msv-magic-link-auth'),
+            'msg_email_required' => __('Please enter a valid email address.', 'msv-magic-link-auth'),
+            'msg_confirm' => __('Click the button below to confirm your identity and continue.', 'msv-magic-link-auth'),
+            'msg_disposable' => __('Disposable email addresses are not allowed. Please use a personal address.', 'msv-magic-link-auth'),
             'custom_disposable_domains' => '',
             'disposable_allowlist' => '',
             'log_retention_days' => 3,
@@ -88,7 +97,37 @@ final class MSV_Magic_Link_Auth {
             $settings['token_ttl'] = max(1, (int) $settings['dev_mode_minutes']) * MINUTE_IN_SECONDS;
         }
 
+        $settings['request_page_path'] = self::resolve_stored_page_path((string) $settings['request_page_path'], '/');
+        $settings['vote_page_path'] = self::resolve_stored_page_path((string) $settings['vote_page_path'], '/');
+        $settings['confirm_page_path'] = self::resolve_stored_page_path((string) $settings['confirm_page_path'], '');
+
         return $settings;
+    }
+
+    /**
+     * Resolves a stored path/page-ID setting to an actual relative URL path.
+     * A digit-only stored value is a WordPress page ID (the normal case once
+     * the settings page's page picker has been used); anything else is a
+     * legacy free-text path or the explicit "Custom / other" fallback value,
+     * used as-is. Falls back to $empty_fallback if empty, or if a stored
+     * page ID no longer resolves (page deleted/unpublished since it was
+     * picked).
+     */
+    private static function resolve_stored_page_path(string $stored, string $empty_fallback): string {
+        if ($stored === '') {
+            return $empty_fallback;
+        }
+
+        if (ctype_digit($stored)) {
+            $permalink = get_permalink((int) $stored);
+            if (!$permalink) {
+                return $empty_fallback;
+            }
+            $path = (string) wp_parse_url($permalink, PHP_URL_PATH);
+            return $path === '' ? $empty_fallback : untrailingslashit('/' . ltrim($path, '/'));
+        }
+
+        return $stored;
     }
 
     private function log_event(string $level, string $message): void {
@@ -125,19 +164,22 @@ final class MSV_Magic_Link_Auth {
         $error = '';
 
         if (isset($_GET['msv_magic_status'])) {
+            // Reuses the same editable messages as render_status_notice() (the
+            // Elementor-path toast) rather than a separate hardcoded set, so
+            // editing a message once in Messaging applies everywhere it's shown.
             $status = sanitize_key(wp_unslash($_GET['msv_magic_status']));
             if ($status === 'sent') {
-                $message = 'Check your email for your magic link.';
+                $message = $settings['msg_sent'];
             } elseif ($status === 'invalid') {
-                $error = 'This magic link is invalid or has expired.';
+                $error = $settings['msg_invalid'];
             } elseif ($status === 'rate_limited') {
-                $error = 'Too many attempts from this IP. Please wait and try again later.';
+                $error = $settings['msg_rate_limited'];
             } elseif ($status === 'captcha_failed') {
-                $error = 'Turnstile verification failed. Please try again.';
+                $error = $settings['msg_captcha_failed'];
             } elseif ($status === 'email_required') {
-                $error = 'Please enter a valid email address.';
+                $error = $settings['msg_email_required'];
             } elseif ($status === 'disposable') {
-                $error = 'Disposable email addresses are not allowed.';
+                $error = $settings['msg_disposable'];
             }
         }
 
@@ -154,14 +196,14 @@ final class MSV_Magic_Link_Auth {
                 <input type="hidden" name="msv_magic_link_action" value="request_link">
                 <?php wp_nonce_field(self::NONCE_ACTION, 'msv_magic_nonce'); ?>
                 <p>
-                    <label for="msv_magiclinkemail" class="screen-reader-text">Email</label>
-                    <input type="email" id="msv_magiclinkemail" name="magiclinkemail" required autocomplete="email" placeholder="Email" />
+                    <label for="msv_magiclinkemail" class="screen-reader-text"><?php esc_html_e('Email', 'msv-magic-link-auth'); ?></label>
+                    <input type="email" id="msv_magiclinkemail" name="magiclinkemail" required autocomplete="email" placeholder="<?php esc_attr_e('Email', 'msv-magic-link-auth'); ?>" />
                 </p>
                 <?php if (!empty($settings['turnstile_enabled'])): ?>
                     <div class="cf-turnstile" data-sitekey="<?php echo esc_attr($settings['site_key']); ?>" data-theme="auto"></div>
                 <?php endif; ?>
                 <p>
-                    <button type="submit">Recevoir le lien magique</button>
+                    <button type="submit"><?php esc_html_e('Send magic link', 'msv-magic-link-auth'); ?></button>
                 </p>
             </form>
         </div>
@@ -183,7 +225,7 @@ final class MSV_Magic_Link_Auth {
         }
 
         if (!isset($_POST['msv_magic_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['msv_magic_nonce'])), self::NONCE_ACTION)) {
-            wp_die('Invalid request.', 403);
+            wp_die(esc_html__('Invalid request.', 'msv-magic-link-auth'), 403);
         }
 
         $redirect_url = $this->current_request_page_url();
@@ -227,7 +269,7 @@ final class MSV_Magic_Link_Auth {
 
     /**
      * Handles submissions coming from an Elementor Pro form via the
-     * "MSV Magic Link" action registered in register_elementor_form_action().
+     * "Magic Link Auth" action registered in register_elementor_form_action().
      * Elementor's own AJAX handler never reaches handle_form_submission()
      * above (different POST shape/route), so this is a separate entry point
      * into the same rate-limit/turnstile/issue_magic_link logic.
@@ -236,23 +278,24 @@ final class MSV_Magic_Link_Auth {
      * @param \ElementorPro\Modules\Forms\Classes\Ajax_Handler $ajax_handler
      */
     public function handle_elementor_form_submission($record, $ajax_handler): void {
+        $settings = self::settings();
         $fields = $record->get('fields');
         $email = isset($fields['magiclinkemail']['value']) ? sanitize_email($fields['magiclinkemail']['value']) : '';
 
         if (!$email || !is_email($email)) {
-            $ajax_handler->add_error_message('Please enter a valid email address.');
+            $ajax_handler->add_error_message($settings['msg_email_required']);
             return;
         }
         $email = $this->normalize_email($email);
 
         if ($this->is_disposable_email($email)) {
             $this->log_event('warning', 'Blocked disposable email domain: ' . substr($email, strrpos($email, '@') + 1));
-            $ajax_handler->add_error_message(self::settings()['msg_disposable']);
+            $ajax_handler->add_error_message($settings['msg_disposable']);
             return;
         }
 
         if ($this->is_rate_limited()) {
-            $ajax_handler->add_error_message('Too many attempts from this IP. Please wait and try again later.');
+            $ajax_handler->add_error_message($settings['msg_rate_limited']);
             return;
         }
 
@@ -270,7 +313,7 @@ final class MSV_Magic_Link_Auth {
     }
 
     /**
-     * Registers the "MSV Magic Link" action so it can be attached under an
+     * Registers the "Magic Link Auth" action so it can be attached under an
      * Elementor Pro form's "Actions After Submit". Delegates the actual
      * class declaration to msv_magic_link_declare_elementor_action() below:
      * PHP does not allow a class to be declared inside a class method, only
@@ -299,7 +342,12 @@ final class MSV_Magic_Link_Auth {
                     }
                     printf(
                         '<div class="notice notice-error"><p>%s <a href="%s">%s</a></p></div>',
-                        esc_html('MSV Magic Link Auth: "MSV Magic Link" Elementor action was NOT registered. ' . $base_class . ' requires a method this plugin does not implement: ' . $missing . '().'),
+                        esc_html(sprintf(
+                            /* translators: 1: Elementor Pro base class name, 2: missing method name */
+                            __('WP Magic Link Auth: the Elementor form action was NOT registered. %1$s requires a method this plugin does not implement: %2$s().', 'msv-magic-link-auth'),
+                            $base_class,
+                            $missing
+                        )),
                         esc_url(admin_url('options-general.php?page=' . self::SETTINGS_PAGE_SLUG)),
                         esc_html__('View log', 'msv-magic-link-auth')
                     );
@@ -396,7 +444,7 @@ final class MSV_Magic_Link_Auth {
         }
 
         if (!isset($_POST['msv_magic_confirm_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['msv_magic_confirm_nonce'])), self::CONFIRM_NONCE_ACTION)) {
-            wp_die('Invalid request.', 403);
+            wp_die(esc_html__('Invalid request.', 'msv-magic-link-auth'), 403);
         }
 
         $token = sanitize_text_field(wp_unslash($_POST['msv_magic_confirm_token']));
@@ -588,7 +636,7 @@ final class MSV_Magic_Link_Auth {
             var button = document.createElement('button');
             button.type = 'submit';
             button.className = 'msv-magic-link-confirm-button';
-            button.textContent = 'Accéder au vote';
+            button.textContent = <?php echo wp_json_encode(__('Continue', 'msv-magic-link-auth')); ?>;
 
             form.appendChild(tokenField);
             form.appendChild(nonceField);
@@ -848,24 +896,37 @@ final class MSV_Magic_Link_Auth {
     private function send_magic_email(WP_User $user, string $magic_url): void {
         $settings = self::settings();
         $subject = $settings['email_subject'];
-        $logo_url = plugins_url('assets/logo.png', __FILE__);
+        $html_lang = esc_attr(get_bloginfo('language'));
 
-        $message = '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>' . esc_html($subject) . '</title></head>'
+        // Only reference a bundled logo if one actually exists - a fresh
+        // install of this plugin elsewhere won't have a site-specific logo
+        // file, and a missing image is better than a broken <img> in every email.
+        $logo_html = '';
+        if (file_exists(__DIR__ . '/assets/logo.png')) {
+            $logo_url = plugins_url('assets/logo.png', __FILE__);
+            $logo_html = '<tr><td align="left" style="padding:0 0 28px;"><img src="' . esc_url($logo_url) . '" alt="' . esc_attr(get_bloginfo('name')) . '" width="200" style="display:block;width:200px;height:auto;"></td></tr>';
+        }
+
+        $intro = __('Click the button below to continue. This link is valid for a limited time and can only be used once.', 'msv-magic-link-auth');
+        $button_label = __('Continue', 'msv-magic-link-auth');
+        $fallback_label = __('If the button doesn\'t work, use this link:', 'msv-magic-link-auth');
+        $footer = __('If you did not request this link, you can safely ignore this email.', 'msv-magic-link-auth');
+
+        $message = '<!DOCTYPE html><html lang="' . $html_lang . '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>' . esc_html($subject) . '</title></head>'
             . '<body style="margin:0;padding:0;background-color:#080e10;font-family:Arial,Helvetica,sans-serif;">'
             . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#080e10;margin:0;padding:0;"><tr><td align="center" style="padding:48px 20px;">'
             . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;">'
-            . '<tr><td align="left" style="padding:0 0 28px;"><img src="' . esc_url($logo_url) . '" alt="' . esc_attr(get_bloginfo('name')) . '" width="200" style="display:block;width:200px;height:auto;"></td></tr>'
+            . $logo_html
             . '<tr><td style="background-color:#2e3335;border:4px solid #d4a95e;border-radius:32px 0px 32px 0px;padding:44px 40px;box-shadow:0 2px 24px rgba(0,0,0,0.8);">'
-            . '<h1 style="margin:0 0 20px;font-size:32px;text-transform:uppercase;line-height:1.3;color:#d4a95e;font-weight:400;font-family:Arial,Helvetica,sans-serif;">Votre lien de vote</h1>'
-            . '<p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#ffffff;">Bonjour,</p>'
-            . '<p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#ffffff;">Cliquez sur le bouton ci-dessous pour accéder au vote. Ce lien est valable 24 heures et ne peut être utilisé qu\'une seule fois.</p>'
+            . '<h1 style="margin:0 0 20px;font-size:32px;text-transform:uppercase;line-height:1.3;color:#d4a95e;font-weight:400;font-family:Arial,Helvetica,sans-serif;">' . esc_html($subject) . '</h1>'
+            . '<p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#ffffff;">' . esc_html($intro) . '</p>'
             . '<table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:999px;background-color:#d4a95e;">'
-            . '<a href="' . esc_url($magic_url) . '" style="display:inline-block;padding:16px 34px;font-size:16px;font-weight:700;color:#080e10;text-decoration:none;border-radius:999px;font-family:Arial,Helvetica,sans-serif;">Accéder au vote</a>'
+            . '<a href="' . esc_url($magic_url) . '" style="display:inline-block;padding:16px 34px;font-size:16px;font-weight:700;color:#080e10;text-decoration:none;border-radius:999px;font-family:Arial,Helvetica,sans-serif;">' . esc_html($button_label) . '</a>'
             . '</td></tr></table>'
-            . '<p style="margin:36px 0 8px;font-size:14px;line-height:1.6;color:#a1a4a5;">Si le bouton ne fonctionne pas, utilisez ce lien :</p>'
+            . '<p style="margin:36px 0 8px;font-size:14px;line-height:1.6;color:#a1a4a5;">' . esc_html($fallback_label) . '</p>'
             . '<p style="margin:0 0 32px;font-size:14px;line-height:1.6;word-break:break-all;"><a href="' . esc_url($magic_url) . '" style="color:rgba(161,164,165,0.6);text-decoration:underline;">' . esc_html($magic_url) . '</a></p>'
             . '<hr style="border:none;border-top:1px solid rgba(161,164,165,0.25);margin:0 0 20px;">'
-            . '<p style="margin:0;font-size:12px;line-height:1.6;color:#a1a4a5;">Si vous n\'avez pas demandé ce lien, ignorez cet e-mail.</p>'
+            . '<p style="margin:0;font-size:12px;line-height:1.6;color:#a1a4a5;">' . esc_html($footer) . '</p>'
             . '</td></tr>'
             . '</table>'
             . '</td></tr></table>'
@@ -1106,7 +1167,7 @@ final class MSV_Magic_Link_Auth {
         }
 
         $info = new stdClass();
-        $info->name = 'WP Magic Link Auth';
+        $info->name = __('WP Magic Link Auth', 'msv-magic-link-auth');
         $info->slug = dirname(plugin_basename(__FILE__));
         $info->version = $release['tag_name'];
         $info->author = '<a href="mailto:igor@igibits.com">igor@igibits.com</a>';
@@ -1114,7 +1175,7 @@ final class MSV_Magic_Link_Auth {
         $info->requires_php = '8.4';
         $info->download_link = $release['package_url'];
         $info->sections = [
-            'description' => 'Passwordless magic-link auth for the voting site.',
+            'description' => esc_html__('Passwordless magic-link authentication with rate limiting, an optional protected page, and a disposable-email blocklist.', 'msv-magic-link-auth'),
             'changelog' => wpautop(esc_html($release['body'])),
         ];
 
@@ -1171,8 +1232,8 @@ final class MSV_Magic_Link_Auth {
 
     public function register_settings_page(): void {
         add_options_page(
-            'WP Magic Link Auth',
-            'WP Magic Link Auth',
+            __('WP Magic Link Auth', 'msv-magic-link-auth'),
+            __('WP Magic Link Auth', 'msv-magic-link-auth'),
             'manage_options',
             self::SETTINGS_PAGE_SLUG,
             [$this, 'render_settings_page']
@@ -1188,45 +1249,163 @@ final class MSV_Magic_Link_Auth {
         return untrailingslashit('/' . ltrim($path, '/'));
     }
 
+    /**
+     * Read-only, admin-render-time only: best-effort match of a legacy
+     * free-text path to a published Page, so the picker dropdown
+     * pre-selects the right page the first time this renders after
+     * upgrading from free-text paths. Never called from settings()/runtime
+     * - only from render_settings_page(). Self-migrating: once the admin
+     * saves once via the picker the stored value becomes numeric and this
+     * is skipped forever after, the same self-migrating pattern already
+     * used for pre-'ts' log entries in log_event().
+     */
+    private function match_legacy_path_to_page_id(string $stored): int {
+        $target = untrailingslashit('/' . ltrim($stored, '/'));
+        foreach (get_pages(['post_status' => 'publish']) as $page) {
+            $permalink = get_permalink($page);
+            if (!$permalink) {
+                continue;
+            }
+            $page_path = untrailingslashit('/' . ltrim((string) wp_parse_url($permalink, PHP_URL_PATH), '/'));
+            if ($page_path === $target) {
+                return (int) $page->ID;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Figures out how a stored path/page-ID setting should be displayed in
+     * the settings-page picker: which dropdown option is selected, and what
+     * (if anything) belongs in the "Custom / other" fallback text input.
+     */
+    private function page_picker_display_state(string $stored, bool $allow_inherit): array {
+        if ($allow_inherit && $stored === '') {
+            return ['mode' => 'inherit', 'page_id' => 0, 'custom' => ''];
+        }
+
+        if ($stored !== '' && ctype_digit($stored)) {
+            if (get_post_status((int) $stored) === 'publish') {
+                return ['mode' => 'page', 'page_id' => (int) $stored, 'custom' => ''];
+            }
+            return ['mode' => 'custom', 'page_id' => 0, 'custom' => '']; // page since deleted/unpublished
+        }
+
+        $matched = $stored !== '' ? $this->match_legacy_path_to_page_id($stored) : 0;
+        if ($matched > 0) {
+            return ['mode' => 'page', 'page_id' => $matched, 'custom' => $stored];
+        }
+
+        return ['mode' => 'custom', 'page_id' => 0, 'custom' => $stored];
+    }
+
+    /**
+     * Renders a <select> of published pages via wp_dropdown_pages(), with a
+     * "Custom / other" option (value "0", never a real post ID) and,
+     * optionally, a "Use request page path" option (value "-1") for the
+     * confirm-page field's inherit behavior. Neither synthetic option is
+     * auto-selected by core, so the correct one is marked selected here by
+     * matching the exact literal tag wp_dropdown_pages() emits for it.
+     */
+    private function render_page_dropdown(string $name, string $mode, int $selected_page_id, bool $allow_inherit): string {
+        $args = [
+            'name' => $name,
+            'id' => $name,
+            'class' => 'msv-page-picker',
+            'echo' => 0,
+            'selected' => $selected_page_id,
+            'show_option_none' => esc_html__('— Custom / other (enter path manually) —', 'msv-magic-link-auth'),
+            'option_none_value' => '0',
+        ];
+        if ($allow_inherit) {
+            $args['show_option_no_change'] = esc_html__('— Use request page path (default) —', 'msv-magic-link-auth');
+        }
+
+        $dropdown = wp_dropdown_pages($args);
+
+        if ($dropdown === '') {
+            // No published pages site-wide: wp_dropdown_pages() returns ''
+            // even with show_option_* set, so build a minimal fallback by hand.
+            $dropdown = '<select name="' . esc_attr($name) . '" id="' . esc_attr($name) . '" class="msv-page-picker">'
+                . ($allow_inherit ? '<option value="-1">' . esc_html__('— Use request page path (default) —', 'msv-magic-link-auth') . '</option>' : '')
+                . '<option value="0">' . esc_html__('— Custom / other (enter path manually) —', 'msv-magic-link-auth') . '</option></select>';
+        }
+
+        if ($mode === 'custom') {
+            $dropdown = str_replace('<option value="0">', '<option value="0" selected="selected">', $dropdown);
+        } elseif ($mode === 'inherit') {
+            $dropdown = str_replace('<option value="-1">', '<option value="-1" selected="selected">', $dropdown);
+        }
+
+        return $dropdown;
+    }
+
     public function render_settings_page(): void {
         if (!current_user_can('manage_options')) {
             return;
         }
 
+        $tabs = ['setup', 'email', 'messaging', 'log'];
         $notice = '';
         $error_notice = '';
 
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!isset($_POST['msv_magic_settings_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['msv_magic_settings_nonce'])), self::SETTINGS_NONCE_ACTION)) {
-                wp_die('Invalid request.', 403);
+                wp_die(esc_html__('Invalid request.', 'msv-magic-link-auth'), 403);
             }
 
             if (isset($_POST['msv_magic_clear_log'])) {
                 delete_option(self::LOG_OPTION_KEY);
-                $notice = 'Log cleared.';
+                $notice = __('Log cleared.', 'msv-magic-link-auth');
             } elseif (isset($_POST['msv_magic_refresh_disposable'])) {
                 $result = $this->refresh_disposable_list_from_source();
                 if (is_wp_error($result)) {
-                    $error_notice = 'Could not refresh the list: ' . $result->get_error_message() . ' The current list was left unchanged.';
+                    /* translators: %s: error message */
+                    $error_notice = sprintf(__('Could not refresh the list: %s The current list was left unchanged.', 'msv-magic-link-auth'), $result->get_error_message());
                 } else {
-                    $notice = 'Disposable-domain list refreshed: ' . (int) $result['count'] . ' domains.';
+                    /* translators: %d: number of domains loaded */
+                    $notice = sprintf(__('Disposable-domain list refreshed: %d domains.', 'msv-magic-link-auth'), (int) $result['count']);
                 }
             } else {
-                // Empty means "not configured, fall back to request_page_path" -
-                // distinct from sanitize_path()'s own empty-input behavior,
-                // which would turn it into "/" (the home page).
-                $confirm_page_path_raw = trim(sanitize_text_field(wp_unslash($_POST['confirm_page_path'] ?? '')));
+                // Existing stored values, used as the fallback whenever a field
+                // is absent from $_POST - this happens legitimately for any
+                // <input disabled> (dev-mode/Turnstile pairs), since disabled
+                // controls are excluded from submitted form data by the HTML
+                // spec. Without this fallback, saving while e.g. Turnstile is
+                // off would silently blank the stored keys via `?? ''`.
+                $existing = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaults());
+
+                $request_page_id = isset($_POST['request_page_id']) ? sanitize_text_field(wp_unslash($_POST['request_page_id'])) : '0';
+                $request_page_path = (ctype_digit($request_page_id) && (int) $request_page_id > 0 && get_post_status((int) $request_page_id) === 'publish')
+                    ? $request_page_id
+                    : $this->sanitize_path(wp_unslash($_POST['request_page_custom'] ?? ''));
+
+                $vote_page_id = isset($_POST['vote_page_id']) ? sanitize_text_field(wp_unslash($_POST['vote_page_id'])) : '0';
+                $vote_page_path = (ctype_digit($vote_page_id) && (int) $vote_page_id > 0 && get_post_status((int) $vote_page_id) === 'publish')
+                    ? $vote_page_id
+                    : $this->sanitize_path(wp_unslash($_POST['vote_page_custom'] ?? ''));
+
+                // "-1" preserves the existing "blank = inherit request_page_path" behavior.
+                $confirm_page_id = isset($_POST['confirm_page_id']) ? sanitize_text_field(wp_unslash($_POST['confirm_page_id'])) : '-1';
+                if ($confirm_page_id === '-1') {
+                    $confirm_page_path = '';
+                } elseif (ctype_digit($confirm_page_id) && (int) $confirm_page_id > 0 && get_post_status((int) $confirm_page_id) === 'publish') {
+                    $confirm_page_path = $confirm_page_id;
+                } else {
+                    $confirm_raw = trim(sanitize_text_field(wp_unslash($_POST['confirm_page_custom'] ?? '')));
+                    $confirm_page_path = $confirm_raw === '' ? '' : $this->sanitize_path($confirm_raw);
+                }
 
                 update_option(self::OPTION_KEY, [
-                    'site_key' => sanitize_text_field(wp_unslash($_POST['site_key'] ?? '')),
-                    'secret_key' => sanitize_text_field(wp_unslash($_POST['secret_key'] ?? '')),
-                    'request_page_path' => $this->sanitize_path(wp_unslash($_POST['request_page_path'] ?? '')),
-                    'confirm_page_path' => $confirm_page_path_raw === '' ? '' : $this->sanitize_path($confirm_page_path_raw),
-                    'vote_page_path' => $this->sanitize_path(wp_unslash($_POST['vote_page_path'] ?? '')),
+                    'site_key' => array_key_exists('site_key', $_POST) ? sanitize_text_field(wp_unslash($_POST['site_key'])) : $existing['site_key'],
+                    'secret_key' => array_key_exists('secret_key', $_POST) ? sanitize_text_field(wp_unslash($_POST['secret_key'])) : $existing['secret_key'],
+                    'request_page_path' => $request_page_path,
+                    'confirm_page_path' => $confirm_page_path,
+                    'vote_page_path' => $vote_page_path,
                     'max_attempts_per_hour' => max(1, absint($_POST['max_attempts_per_hour'] ?? 3)),
-                    'token_ttl' => max(1, absint($_POST['token_ttl_hours'] ?? 24)) * HOUR_IN_SECONDS,
+                    'token_ttl' => array_key_exists('token_ttl_hours', $_POST) ? max(1, absint($_POST['token_ttl_hours'])) * HOUR_IN_SECONDS : $existing['token_ttl'],
                     'dev_mode' => isset($_POST['dev_mode']),
-                    'dev_mode_minutes' => max(1, absint($_POST['dev_mode_minutes'] ?? 10)),
+                    'dev_mode_minutes' => array_key_exists('dev_mode_minutes', $_POST) ? max(1, absint($_POST['dev_mode_minutes'])) : $existing['dev_mode_minutes'],
                     'email_from_name' => sanitize_text_field(wp_unslash($_POST['email_from_name'] ?? '')),
                     'email_subject' => sanitize_text_field(wp_unslash($_POST['email_subject'] ?? '')),
                     'turnstile_enabled' => isset($_POST['turnstile_enabled']),
@@ -1241,203 +1420,318 @@ final class MSV_Magic_Link_Auth {
                     'disposable_allowlist' => sanitize_textarea_field(wp_unslash($_POST['disposable_allowlist'] ?? '')),
                     'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
                 ]);
-                $notice = 'Settings saved.';
+                $notice = __('Settings saved.', 'msv-magic-link-auth');
             }
         }
 
-        // Deliberately NOT self::settings() here: that applies the dev-mode
-        // minutes override to token_ttl, which would make this form display
-        // (and, on save, persist) the wrong "expiry hours" value while dev
-        // mode is on. This page always shows/edits the real stored config.
+        $initial_tab = ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['msv_active_tab'] ?? '', $tabs, true))
+            ? sanitize_key(wp_unslash($_POST['msv_active_tab']))
+            : $tabs[0];
+
+        // Deliberately NOT self::settings() here: that resolves page IDs to
+        // paths and applies the dev-mode minutes override to token_ttl,
+        // which would make this form display (and, on save, persist) the
+        // wrong values. This page always shows/edits the real stored config.
         $settings = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaults());
         $log = get_option(self::LOG_OPTION_KEY, []);
         if (!is_array($log)) {
             $log = [];
         }
         $update = $this->get_update_status_for_display();
+        $disposable_status = get_option(self::DISPOSABLE_OPTION_KEY, []);
+
+        $request_state = $this->page_picker_display_state((string) $settings['request_page_path'], false);
+        $vote_state = $this->page_picker_display_state((string) $settings['vote_page_path'], false);
+        $confirm_state = $this->page_picker_display_state((string) $settings['confirm_page_path'], true);
         ?>
-        <div class="wrap">
-            <h1><strong>WP Magic Link Auth</strong></h1>
-            <p>Developed by igor@igibits.com</p>
-            <?php if ($notice): ?>
-                <div class="notice notice-success is-dismissible"><p><?php echo esc_html($notice); ?></p></div>
-            <?php endif; ?>
-            <?php if ($error_notice): ?>
-                <div class="notice notice-error is-dismissible"><p><?php echo esc_html($error_notice); ?></p></div>
-            <?php endif; ?>
-            <?php if (!empty($settings['dev_mode'])): ?>
-                <div class="notice notice-warning"><p><strong>Development mode is ON</strong> — magic links expire after <?php echo esc_html((string) max(1, absint($settings['dev_mode_minutes']))); ?> minute(s) regardless of the setting below. Turn this off before the real election.</p></div>
-            <?php endif; ?>
+        <div class="wrap msv-settings-wrap<?php echo is_admin_bar_showing() ? ' msv-has-adminbar' : ''; ?>">
 
-            <form method="post">
-                <?php wp_nonce_field(self::SETTINGS_NONCE_ACTION, 'msv_magic_settings_nonce'); ?>
-
+            <div class="msv-sticky-header">
+                <h1><strong><?php esc_html_e('WP Magic Link Auth', 'msv-magic-link-auth'); ?></strong></h1>
+                <p><?php esc_html_e('Developed by igor@igibits.com', 'msv-magic-link-auth'); ?></p>
+                <?php if ($notice): ?>
+                    <div class="notice notice-success is-dismissible"><p><?php echo esc_html($notice); ?></p></div>
+                <?php endif; ?>
+                <?php if ($error_notice): ?>
+                    <div class="notice notice-error is-dismissible"><p><?php echo esc_html($error_notice); ?></p></div>
+                <?php endif; ?>
+                <?php if (!empty($settings['dev_mode'])): ?>
+                    <div class="notice notice-warning">
+                        <p>
+                            <?php
+                            printf(
+                                /* translators: 1: "Development mode is ON —" (bold), 2: number of minutes */
+                                esc_html__('%1$s Magic links expire after %2$d minute(s) regardless of the setting below. Turn this off before going live.', 'msv-magic-link-auth'),
+                                '<strong>' . esc_html__('Development mode is ON —', 'msv-magic-link-auth') . '</strong>',
+                                (int) max(1, absint($settings['dev_mode_minutes']))
+                            );
+                            ?>
+                        </p>
+                    </div>
+                <?php endif; ?>
                 <p style="display:flex;gap:8px;align-items:center;">
-                    <?php submit_button('Save settings', 'primary', 'submit', false); ?>
+                    <?php submit_button(__('Save settings', 'msv-magic-link-auth'), 'primary', 'submit', false, ['form' => 'msv-settings-form']); ?>
                     <?php if ($update['available']): ?>
-                        <a href="<?php echo esc_url($update['url']); ?>" class="button">Update plugin</a>
+                        <a href="<?php echo esc_url($update['url']); ?>" class="button"><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></a>
                     <?php else: ?>
-                        <button type="button" class="button" disabled>Update plugin</button>
+                        <button type="button" class="button" disabled><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></button>
                     <?php endif; ?>
                 </p>
                 <p class="description"><?php echo esc_html($update['message']); ?></p>
-                <hr>
+            </div>
 
-                <h2>Paths and limitations</h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><label for="request_page_path">Request page path</label></th>
-                        <td><input type="text" id="request_page_path" name="request_page_path" class="regular-text" value="<?php echo esc_attr($settings['request_page_path']); ?>"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="confirm_page_path">Vote confirmation page path</label></th>
-                        <td>
-                            <input type="text" id="confirm_page_path" name="confirm_page_path" class="regular-text" placeholder="<?php echo esc_attr($settings['request_page_path']); ?>" value="<?php echo esc_attr($settings['confirm_page_path']); ?>">
-                            <p class="description">Where the emailed magic link itself points to. Leave blank to use the request page path above.</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="vote_page_path">Vote page path</label></th>
-                        <td><input type="text" id="vote_page_path" name="vote_page_path" class="regular-text" value="<?php echo esc_attr($settings['vote_page_path']); ?>"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="max_attempts_per_hour">Max attempts per hour (per IP)</label></th>
-                        <td><input type="number" min="1" id="max_attempts_per_hour" name="max_attempts_per_hour" value="<?php echo esc_attr((string) $settings['max_attempts_per_hour']); ?>"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="token_ttl_hours">Magic link expiry (hours)</label></th>
-                        <td><input type="number" min="1" id="token_ttl_hours" name="token_ttl_hours" <?php disabled(!empty($settings['dev_mode'])); ?> value="<?php echo esc_attr((string) round($settings['token_ttl'] / HOUR_IN_SECONDS)); ?>"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="dev_mode">Development mode</label></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" id="dev_mode" name="dev_mode" value="1" <?php checked(!empty($settings['dev_mode'])); ?>>
-                                Force magic link expiry to a fixed number of minutes, ignoring the hours setting above (for testing only)
-                            </label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="dev_mode_minutes">Development mode expiry (minutes)</label></th>
-                        <td><input type="number" min="1" id="dev_mode_minutes" name="dev_mode_minutes" <?php disabled(empty($settings['dev_mode'])); ?> value="<?php echo esc_attr((string) max(1, absint($settings['dev_mode_minutes']))); ?>"></td>
-                    </tr>
-                </table>
+            <h2 class="nav-tab-wrapper" role="tablist" aria-label="<?php esc_attr_e('Settings sections', 'msv-magic-link-auth'); ?>">
+                <button type="button" class="nav-tab<?php echo $initial_tab === 'setup' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-setup" aria-controls="msv-tab-setup" aria-selected="<?php echo $initial_tab === 'setup' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'setup' ? '0' : '-1'; ?>" data-msv-tab-target="setup"><?php esc_html_e('Setup', 'msv-magic-link-auth'); ?></button>
+                <button type="button" class="nav-tab<?php echo $initial_tab === 'email' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-email" aria-controls="msv-tab-email" aria-selected="<?php echo $initial_tab === 'email' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'email' ? '0' : '-1'; ?>" data-msv-tab-target="email"><?php esc_html_e('Email & Blocklist', 'msv-magic-link-auth'); ?></button>
+                <button type="button" class="nav-tab<?php echo $initial_tab === 'messaging' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-messaging" aria-controls="msv-tab-messaging" aria-selected="<?php echo $initial_tab === 'messaging' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'messaging' ? '0' : '-1'; ?>" data-msv-tab-target="messaging"><?php esc_html_e('Messaging', 'msv-magic-link-auth'); ?></button>
+                <button type="button" class="nav-tab<?php echo $initial_tab === 'log' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-log" aria-controls="msv-tab-log" aria-selected="<?php echo $initial_tab === 'log' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'log' ? '0' : '-1'; ?>" data-msv-tab-target="log"><?php esc_html_e('Log', 'msv-magic-link-auth'); ?></button>
+            </h2>
 
-                <h2>Email setup</h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><label for="email_from_name">Email "from" name</label></th>
-                        <td><input type="text" id="email_from_name" name="email_from_name" class="regular-text" value="<?php echo esc_attr($settings['email_from_name']); ?>"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="email_subject">Email subject</label></th>
-                        <td><input type="text" id="email_subject" name="email_subject" class="regular-text" value="<?php echo esc_attr($settings['email_subject']); ?>"></td>
-                    </tr>
-                </table>
+            <form method="post" id="msv-settings-form">
+                <?php wp_nonce_field(self::SETTINGS_NONCE_ACTION, 'msv_magic_settings_nonce'); ?>
+                <input type="hidden" name="msv_active_tab" id="msv_active_tab" value="<?php echo esc_attr($initial_tab); ?>">
 
-                <h2>Cloudflare Turnstile</h2>
-                <table class="form-table" role="presentation">
-                    <tbody>
+                <div class="msv-tab-panel" data-msv-tab="setup" id="msv-tab-setup" role="tabpanel" aria-labelledby="msv-tab-btn-setup" tabindex="0" <?php echo $initial_tab !== 'setup' ? 'hidden' : ''; ?>>
+                    <h2><?php esc_html_e('Paths and limitations', 'msv-magic-link-auth'); ?></h2>
+                    <table class="form-table" role="presentation">
                         <tr>
-                            <th scope="row"><label for="turnstile_enabled">Enable Turnstile</label></th>
+                            <th scope="row"><label for="request_page_id"><?php esc_html_e('Request page', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <?php echo $this->render_page_dropdown('request_page_id', $request_state['mode'], $request_state['page_id'], false); ?>
+                                <input type="text" id="request_page_custom" name="request_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($request_state['custom']); ?>" <?php echo $request_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
+                                <p class="description"><?php esc_html_e('The page where visitors request a magic link.', 'msv-magic-link-auth'); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="confirm_page_id"><?php esc_html_e('Confirmation page', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <?php echo $this->render_page_dropdown('confirm_page_id', $confirm_state['mode'], $confirm_state['page_id'], true); ?>
+                                <input type="text" id="confirm_page_custom" name="confirm_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($confirm_state['custom']); ?>" <?php echo $confirm_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
+                                <p class="description"><?php esc_html_e('Where the emailed magic link itself points to.', 'msv-magic-link-auth'); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="vote_page_id"><?php esc_html_e('Protected page', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <?php echo $this->render_page_dropdown('vote_page_id', $vote_state['mode'], $vote_state['page_id'], false); ?>
+                                <input type="text" id="vote_page_custom" name="vote_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($vote_state['custom']); ?>" <?php echo $vote_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
+                                <p class="description"><?php esc_html_e('The page that requires a valid magic-link session to access.', 'msv-magic-link-auth'); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="max_attempts_per_hour"><?php esc_html_e('Max attempts per hour (per IP)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="number" min="1" id="max_attempts_per_hour" name="max_attempts_per_hour" value="<?php echo esc_attr((string) $settings['max_attempts_per_hour']); ?>"></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="token_ttl_hours"><?php esc_html_e('Magic link expiry (hours)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="number" min="1" id="token_ttl_hours" name="token_ttl_hours" <?php disabled(!empty($settings['dev_mode'])); ?> value="<?php echo esc_attr((string) round($settings['token_ttl'] / HOUR_IN_SECONDS)); ?>"></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="dev_mode"><?php esc_html_e('Development mode', 'msv-magic-link-auth'); ?></label></th>
                             <td>
                                 <label>
-                                    <input type="checkbox" id="turnstile_enabled" name="turnstile_enabled" value="1" <?php checked(!empty($settings['turnstile_enabled'])); ?>>
-                                    Verify Cloudflare Turnstile ourselves (leave off if another plugin already handles it on the live form)
+                                    <input type="checkbox" id="dev_mode" name="dev_mode" value="1" <?php checked(!empty($settings['dev_mode'])); ?>>
+                                    <?php esc_html_e('Force magic link expiry to a fixed number of minutes, ignoring the hours setting above (for testing only)', 'msv-magic-link-auth'); ?>
                                 </label>
                             </td>
                         </tr>
-                    </tbody>
-                    <tbody id="msv-turnstile-keys" <?php echo empty($settings['turnstile_enabled']) ? 'style="display:none;"' : ''; ?>>
                         <tr>
-                            <th scope="row"><label for="site_key">Turnstile site key</label></th>
-                            <td><input type="text" id="site_key" name="site_key" class="regular-text" value="<?php echo esc_attr($settings['site_key']); ?>"></td>
+                            <th scope="row"><label for="dev_mode_minutes"><?php esc_html_e('Development mode expiry (minutes)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="number" min="1" id="dev_mode_minutes" name="dev_mode_minutes" <?php disabled(empty($settings['dev_mode'])); ?> value="<?php echo esc_attr((string) max(1, absint($settings['dev_mode_minutes']))); ?>"></td>
+                        </tr>
+                    </table>
+
+                    <hr>
+                    <h2><?php esc_html_e('Cloudflare Turnstile', 'msv-magic-link-auth'); ?></h2>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="turnstile_enabled"><?php esc_html_e('Enable Turnstile', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="turnstile_enabled" name="turnstile_enabled" value="1" <?php checked(!empty($settings['turnstile_enabled'])); ?>>
+                                    <?php esc_html_e('Verify Cloudflare Turnstile ourselves (leave off if another plugin or service already verifies it before this runs)', 'msv-magic-link-auth'); ?>
+                                </label>
+                            </td>
                         </tr>
                         <tr>
-                            <th scope="row"><label for="secret_key">Turnstile secret key</label></th>
-                            <td><input type="password" autocomplete="off" id="secret_key" name="secret_key" class="regular-text" value="<?php echo esc_attr($settings['secret_key']); ?>"></td>
+                            <th scope="row"><label for="site_key"><?php esc_html_e('Turnstile site key', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="text" id="site_key" name="site_key" class="regular-text" <?php disabled(empty($settings['turnstile_enabled'])); ?> value="<?php echo esc_attr($settings['site_key']); ?>"></td>
                         </tr>
-                    </tbody>
-                </table>
+                        <tr>
+                            <th scope="row"><label for="secret_key"><?php esc_html_e('Turnstile secret key', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="password" autocomplete="off" id="secret_key" name="secret_key" class="regular-text" <?php disabled(empty($settings['turnstile_enabled'])); ?> value="<?php echo esc_attr($settings['secret_key']); ?>"></td>
+                        </tr>
+                    </table>
+                </div>
 
-                <h2>Messages</h2>
-                <p class="description">Shown to visitors as a dismissible message in the bottom-right corner of the request page.</p>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><label for="msg_sent">Link sent</label></th>
-                        <td><textarea id="msg_sent" name="msg_sent" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_sent']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_invalid">Link invalid / expired / already used</label></th>
-                        <td><textarea id="msg_invalid" name="msg_invalid" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_invalid']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_rate_limited">Too many attempts</label></th>
-                        <td><textarea id="msg_rate_limited" name="msg_rate_limited" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_rate_limited']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_captcha_failed">Turnstile verification failed</label></th>
-                        <td><textarea id="msg_captcha_failed" name="msg_captcha_failed" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_captcha_failed']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_email_required">Invalid/missing email</label></th>
-                        <td><textarea id="msg_email_required" name="msg_email_required" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_email_required']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_confirm">Confirm-page prompt</label></th>
-                        <td><textarea id="msg_confirm" name="msg_confirm" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_confirm']); ?></textarea></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="msg_disposable">Disposable email rejected</label></th>
-                        <td><textarea id="msg_disposable" name="msg_disposable" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_disposable']); ?></textarea></td>
-                    </tr>
-                </table>
+                <div class="msv-tab-panel" data-msv-tab="email" id="msv-tab-email" role="tabpanel" aria-labelledby="msv-tab-btn-email" tabindex="0" <?php echo $initial_tab !== 'email' ? 'hidden' : ''; ?>>
+                    <h2><?php esc_html_e('Email setup', 'msv-magic-link-auth'); ?></h2>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="email_from_name"><?php esc_html_e('Email "from" name', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="text" id="email_from_name" name="email_from_name" class="regular-text" value="<?php echo esc_attr($settings['email_from_name']); ?>"></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="email_subject"><?php esc_html_e('Email subject', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="text" id="email_subject" name="email_subject" class="regular-text" value="<?php echo esc_attr($settings['email_subject']); ?>"></td>
+                        </tr>
+                    </table>
 
-                <h2>Disposable email blocklist</h2>
-                <p class="description">
-                    Blocks known throwaway email services (Mailinator, temp-mail, etc.) from requesting a magic link, so one person can't vote multiple times using disposable inboxes.
-                    The plugin ships with a snapshot of a public blocklist. New disposable services appear constantly, so <strong>refresh this list shortly before voting opens</strong> to get the most current version — you don't need the developer for this, just click the button below.
-                </p>
-                <?php $disposable_status = get_option(self::DISPOSABLE_OPTION_KEY, []); ?>
-                <p>
-                    <?php if (is_array($disposable_status) && !empty($disposable_status['count'])): ?>
-                        <strong><?php echo esc_html((string) $disposable_status['count']); ?> domains loaded</strong> — last refreshed <?php echo esc_html(wp_date('Y-m-d H:i', (int) ($disposable_status['refreshed'] ?? 0))); ?>.
-                    <?php else: ?>
-                        Using the snapshot bundled with the plugin (never refreshed since install).
-                    <?php endif; ?>
-                </p>
-                <p>
-                    <?php submit_button('Refresh list now', 'secondary', 'msv_magic_refresh_disposable', false); ?>
-                </p>
+                    <hr>
+                    <h2><?php esc_html_e('Disposable email blocklist', 'msv-magic-link-auth'); ?></h2>
+                    <p class="description">
+                        <?php esc_html_e('Blocks known throwaway email services (e.g. Mailinator, temp-mail) from requesting a magic link, so one person can\'t register multiple accounts using disposable inboxes.', 'msv-magic-link-auth'); ?>
+                        <?php esc_html_e('The plugin ships with a snapshot of a public blocklist. New disposable services appear constantly, so refresh this list shortly before you need it most accurate — no developer needed, just click the button below.', 'msv-magic-link-auth'); ?>
+                    </p>
+                    <p>
+                        <?php if (is_array($disposable_status) && !empty($disposable_status['count'])): ?>
+                            <?php
+                            printf(
+                                /* translators: 1: number of domains, 2: date/time last refreshed */
+                                esc_html__('%1$s domains loaded — last refreshed %2$s.', 'msv-magic-link-auth'),
+                                '<strong>' . esc_html((string) $disposable_status['count']) . '</strong>',
+                                esc_html(wp_date('Y-m-d H:i', (int) ($disposable_status['refreshed'] ?? 0)))
+                            );
+                            ?>
+                        <?php else: ?>
+                            <?php esc_html_e('Using the snapshot bundled with the plugin (never refreshed since install).', 'msv-magic-link-auth'); ?>
+                        <?php endif; ?>
+                    </p>
+                    <p>
+                        <?php submit_button(__('Refresh list now', 'msv-magic-link-auth'), 'secondary', 'msv_magic_refresh_disposable', false, ['form' => 'msv-settings-form']); ?>
+                    </p>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="custom_disposable_domains"><?php esc_html_e('Additional domains to block', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <textarea id="custom_disposable_domains" name="custom_disposable_domains" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['custom_disposable_domains']); ?></textarea>
+                                <p class="description"><?php esc_html_e('Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren\'t on the public list yet.', 'msv-magic-link-auth'); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="disposable_allowlist"><?php esc_html_e('Never block these domains', 'msv-magic-link-auth'); ?></label></th>
+                            <td>
+                                <textarea id="disposable_allowlist" name="disposable_allowlist" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['disposable_allowlist']); ?></textarea>
+                                <p class="description"><?php esc_html_e('Use this if a legitimate domain ever gets wrongly blocked.', 'msv-magic-link-auth'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
 
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><label for="custom_disposable_domains">Additional domains to block</label></th>
-                        <td>
-                            <textarea id="custom_disposable_domains" name="custom_disposable_domains" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['custom_disposable_domains']); ?></textarea>
-                            <p class="description">Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren't on the public list yet.</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="disposable_allowlist">Never block these domains</label></th>
-                        <td>
-                            <textarea id="disposable_allowlist" name="disposable_allowlist" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['disposable_allowlist']); ?></textarea>
-                            <p class="description">Use this if a legitimate domain ever gets wrongly blocked.</p>
-                        </td>
-                    </tr>
-                </table>
+                <div class="msv-tab-panel" data-msv-tab="messaging" id="msv-tab-messaging" role="tabpanel" aria-labelledby="msv-tab-btn-messaging" tabindex="0" <?php echo $initial_tab !== 'messaging' ? 'hidden' : ''; ?>>
+                    <h2><?php esc_html_e('Messages', 'msv-magic-link-auth'); ?></h2>
+                    <p class="description"><?php esc_html_e('Shown to visitors as a dismissible message in the bottom-right corner of the request page.', 'msv-magic-link-auth'); ?></p>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="msg_sent"><?php esc_html_e('Link sent', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_sent" name="msg_sent" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_sent']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_invalid"><?php esc_html_e('Link invalid / expired / already used', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_invalid" name="msg_invalid" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_invalid']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_rate_limited"><?php esc_html_e('Too many attempts', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_rate_limited" name="msg_rate_limited" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_rate_limited']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_captcha_failed"><?php esc_html_e('Turnstile verification failed', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_captcha_failed" name="msg_captcha_failed" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_captcha_failed']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_email_required"><?php esc_html_e('Invalid/missing email', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_email_required" name="msg_email_required" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_email_required']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_confirm"><?php esc_html_e('Confirm-page prompt', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_confirm" name="msg_confirm" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_confirm']); ?></textarea></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="msg_disposable"><?php esc_html_e('Disposable email rejected', 'msv-magic-link-auth'); ?></label></th>
+                            <td><textarea id="msg_disposable" name="msg_disposable" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_disposable']); ?></textarea></td>
+                        </tr>
+                    </table>
+                </div>
 
-                <h2>Log retention</h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><label for="log_retention_days">Keep log entries for (days)</label></th>
-                        <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
-                    </tr>
-                </table>
+                <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log" role="tabpanel" aria-labelledby="msv-tab-btn-log" tabindex="0" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
+                    <h2><?php esc_html_e('Log retention', 'msv-magic-link-auth'); ?></h2>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="log_retention_days"><?php esc_html_e('Keep log entries for (days)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
+                        </tr>
+                    </table>
+                </div>
             </form>
 
+            <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log-recent" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
+                <hr>
+                <h2><?php esc_html_e('Recent log', 'msv-magic-link-auth'); ?></h2>
+                <?php if (empty($log)): ?>
+                    <p><?php esc_html_e('No log entries yet.', 'msv-magic-link-auth'); ?></p>
+                <?php else: ?>
+                    <table class="widefat striped">
+                        <thead>
+                            <tr>
+                                <th style="width:160px;"><?php esc_html_e('Time', 'msv-magic-link-auth'); ?></th>
+                                <th style="width:80px;"><?php esc_html_e('Level', 'msv-magic-link-auth'); ?></th>
+                                <th><?php esc_html_e('Message', 'msv-magic-link-auth'); ?></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($log as $entry): ?>
+                            <tr>
+                                <td><?php echo esc_html($entry['time'] ?? ''); ?></td>
+                                <td><?php echo esc_html($entry['level'] ?? ''); ?></td>
+                                <td><?php echo esc_html($entry['message'] ?? ''); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <form method="post" style="margin-top:12px;">
+                        <?php wp_nonce_field(self::SETTINGS_NONCE_ACTION, 'msv_magic_settings_nonce'); ?>
+                        <input type="hidden" name="msv_magic_clear_log" value="1">
+                        <?php submit_button(__('Clear log', 'msv-magic-link-auth'), 'delete', 'submit', false); ?>
+                    </form>
+                <?php endif; ?>
+            </div>
+
+            <style>
+                .msv-sticky-header {
+                    position: sticky;
+                    top: 0;
+                    z-index: 30;
+                    background: #f0f0f1;
+                    padding-top: 10px;
+                    border-bottom: 1px solid #dcdcde;
+                }
+                .msv-has-adminbar .msv-sticky-header { top: 32px; }
+                @media screen and (max-width: 782px) {
+                    .msv-has-adminbar .msv-sticky-header { top: 46px; }
+                }
+            </style>
             <script>
             (function () {
+                var TABS = ['setup', 'email', 'messaging', 'log'];
+
+                function activateTab(tab, skipHistory) {
+                    if (TABS.indexOf(tab) === -1) { tab = TABS[0]; }
+                    document.querySelectorAll('[data-msv-tab-target]').forEach(function (btn) {
+                        var on = btn.getAttribute('data-msv-tab-target') === tab;
+                        btn.classList.toggle('nav-tab-active', on);
+                        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+                        btn.tabIndex = on ? 0 : -1;
+                    });
+                    document.querySelectorAll('[data-msv-tab]').forEach(function (panel) {
+                        panel.hidden = panel.getAttribute('data-msv-tab') !== tab;
+                    });
+                    var hiddenField = document.getElementById('msv_active_tab');
+                    if (hiddenField) { hiddenField.value = tab; }
+                    if (!skipHistory && window.history && history.replaceState) {
+                        history.replaceState(null, '', '#tab=' + tab);
+                    }
+                }
+
                 function syncDevMode() {
                     var devMode = document.getElementById('dev_mode');
                     var hours = document.getElementById('token_ttl_hours');
@@ -1448,10 +1742,18 @@ final class MSV_Magic_Link_Auth {
                 }
                 function syncTurnstile() {
                     var enabled = document.getElementById('turnstile_enabled');
-                    var keys = document.getElementById('msv-turnstile-keys');
-                    if (!enabled || !keys) { return; }
-                    keys.style.display = enabled.checked ? '' : 'none';
+                    var siteKey = document.getElementById('site_key');
+                    var secretKey = document.getElementById('secret_key');
+                    if (!enabled || !siteKey || !secretKey) { return; }
+                    siteKey.disabled = !enabled.checked;
+                    secretKey.disabled = !enabled.checked;
                 }
+                function syncPagePicker(selectId, inputId) {
+                    var select = document.getElementById(selectId), input = document.getElementById(inputId);
+                    if (!select || !input) { return; }
+                    input.style.display = select.value === '0' ? '' : 'none';
+                }
+
                 document.addEventListener('DOMContentLoaded', function () {
                     var devMode = document.getElementById('dev_mode');
                     var turnstile = document.getElementById('turnstile_enabled');
@@ -1459,38 +1761,35 @@ final class MSV_Magic_Link_Auth {
                     if (turnstile) { turnstile.addEventListener('change', syncTurnstile); }
                     syncDevMode();
                     syncTurnstile();
+
+                    [['request_page_id', 'request_page_custom'], ['confirm_page_id', 'confirm_page_custom'], ['vote_page_id', 'vote_page_custom']].forEach(function (pair) {
+                        var select = document.getElementById(pair[0]);
+                        if (select) {
+                            select.addEventListener('change', function () { syncPagePicker(pair[0], pair[1]); });
+                        }
+                        syncPagePicker(pair[0], pair[1]);
+                    });
+
+                    document.querySelectorAll('[data-msv-tab-target]').forEach(function (btn) {
+                        btn.addEventListener('click', function () { activateTab(btn.getAttribute('data-msv-tab-target')); });
+                        btn.addEventListener('keydown', function (e) {
+                            var buttons = Array.prototype.slice.call(document.querySelectorAll('[data-msv-tab-target]'));
+                            var index = buttons.indexOf(btn);
+                            if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                                var next = e.key === 'ArrowRight' ? (index + 1) % buttons.length : (index - 1 + buttons.length) % buttons.length;
+                                buttons[next].focus();
+                                activateTab(buttons[next].getAttribute('data-msv-tab-target'));
+                                e.preventDefault();
+                            }
+                        });
+                    });
+
+                    if (window.location.hash.indexOf('tab=') !== -1) {
+                        activateTab(window.location.hash.split('tab=')[1], true);
+                    }
                 });
             })();
             </script>
-
-            <h2>Recent log</h2>
-            <?php if (empty($log)): ?>
-                <p>No log entries yet.</p>
-            <?php else: ?>
-                <table class="widefat striped">
-                    <thead>
-                        <tr>
-                            <th style="width:160px;">Time</th>
-                            <th style="width:80px;">Level</th>
-                            <th>Message</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($log as $entry): ?>
-                        <tr>
-                            <td><?php echo esc_html($entry['time'] ?? ''); ?></td>
-                            <td><?php echo esc_html($entry['level'] ?? ''); ?></td>
-                            <td><?php echo esc_html($entry['message'] ?? ''); ?></td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-                <form method="post" style="margin-top:12px;">
-                    <?php wp_nonce_field(self::SETTINGS_NONCE_ACTION, 'msv_magic_settings_nonce'); ?>
-                    <input type="hidden" name="msv_magic_clear_log" value="1">
-                    <?php submit_button('Clear log', 'delete', 'submit', false); ?>
-                </form>
-            <?php endif; ?>
         </div>
         <?php
     }
@@ -1512,7 +1811,7 @@ function msv_magic_link_declare_elementor_action(): void {
         }
 
         public function get_label() {
-            return __('MSV Magic Link', 'msv-magic-link-auth');
+            return __('Magic Link Auth', 'msv-magic-link-auth');
         }
 
         public function run($record, $ajax_handler) {

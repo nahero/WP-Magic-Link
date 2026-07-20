@@ -1,0 +1,82 @@
+=== WP Magic Link Auth ===
+Contributors: igor@igibits.com
+Requires at least: 6.0
+Tested up to: 7.0
+Requires PHP: 8.4
+Stable tag: 0.7.0
+License: GPL-2.0-or-later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+
+Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist.
+
+== Description ==
+
+WP Magic Link Auth lets visitors sign in by email instead of a password: they enter their address, receive a single-use link, and clicking it confirms their identity and logs them in. No account creation form, no password to remember or leak.
+
+Core features:
+
+* **Passwordless login** — a WordPress `subscriber` account is created (or reused) automatically the first time someone requests a link.
+* **Two-step confirm flow** — the emailed link only *peeks* at validity; the actual sign-in only happens when the visitor clicks a "Continue" button and submits a real form. This prevents corporate email security scanners (Microsoft Safe Links, Proofpoint, etc.) and chat-app link-preview bots from silently burning single-use links before the real recipient ever clicks them.
+* **Optional protected page** — logged-out visitors are redirected away from a page you choose.
+* **Rate limiting** — configurable max attempts per hour per IP address.
+* **Disposable-email blocklist** — rejects known throwaway email domains (Mailinator, temp-mail, etc.) at request time, with a one-click "refresh from source" button so the blocklist can be kept current without a plugin update, plus admin-editable custom blocklist/allowlist entries.
+* **Email-address normalization** — collapses `name+tag@gmail.com` and dotted Gmail variants to a single canonical account, closing a common multi-account trick.
+* **Cloudflare Turnstile support** — optional, for when no other plugin already verifies it.
+* **Works two ways** — a `[msv_magic_link_form]` shortcode, or an Elementor Pro form action ("Actions After Submit") for use inside an existing Elementor form.
+* **Editable, translatable messages** — every visitor-facing message is editable from the settings screen and follows your site's language via standard WordPress translation files.
+* **Built-in diagnostic log** — every issued/consumed/rejected link is logged with a non-reversible token fingerprint, requester IP, and user agent, pruned automatically by age.
+* **Self-updating from GitHub** — once installed, updates appear in the normal WordPress "Update plugin" flow.
+
+== Installation ==
+
+1. Download the latest release zip from the GitHub repository's Releases page.
+2. In wp-admin, go to **Plugins → Add New → Upload Plugin** and select the zip.
+3. Activate the plugin.
+4. Go to **Settings → WP Magic Link Auth** and configure the Setup tab: choose a request page (where visitors enter their email), a protected page (if any), and adjust rate limiting as needed.
+5. Add the `[msv_magic_link_form]` shortcode to a page, or, if using Elementor Pro, add an email field with field ID `magiclinkemail` to a form and attach the "Magic Link Auth" action under "Actions After Submit".
+
+== Frequently Asked Questions ==
+
+= Does this replace WordPress's normal login? =
+
+No — it's an additional passwordless entry point. Existing username/password login still works.
+
+= What happens to a magic link if it's opened by an email security scanner before the real recipient clicks it? =
+
+Nothing — the plugin's two-step confirm flow is specifically designed so a scanner's automated fetch (which never submits a form or executes JavaScript) can't consume the link. Only a genuine click-and-submit by the recipient does.
+
+= Can I change the wording of the messages visitors see? =
+
+Yes, on the Messaging tab. Every message shown to a visitor is editable, and if a translation file for your site's language is bundled, editing a message starts from that language's text.
+
+= Where is data like the log and disposable-domain list stored? =
+
+In the WordPress options table, under option names prefixed `msv_magic_link_auth_`. Deleting the plugin (not just deactivating it) removes all of it, including any stored magic-link tokens and rate-limit counters.
+
+== Changelog ==
+
+= 0.7.0 =
+* Tabbed settings screen (Setup / Email & Blocklist / Messaging / Log) with a sticky header, page pickers instead of free-text paths, and Turnstile keys that disable instead of hiding.
+* Generalized for distribution: no more site-specific defaults or hardcoded text, full translation support (`languages/`, ships a French translation), uninstall cleanup, and a readme.
+* Fixed a data-loss bug where saving settings while a field was disabled (e.g. Turnstile keys, dev-mode fields) silently blanked/reset it instead of preserving the stored value.
+
+= 0.6.0 =
+* Disposable-email domain blocklist (bundled snapshot + self-service refresh + custom/allowlist), and email-address normalization (`+tag` and Gmail dot-stripping) to reduce multi-account abuse.
+
+= 0.5.2 =
+* Fixed a bug where the update checker could show "update available" and "already at latest version" simultaneously.
+
+= 0.5.1 =
+* Fixed the confirm button rendering on the wrong page / in the wrong position.
+
+= 0.5.0 =
+* Introduced the two-step magic-link confirm flow (peek-only GET, consume-on-POST) to stop email security scanners from silently invalidating links before real recipients click them.
+
+= 0.4.x =
+* Dark-themed HTML email matching site branding; configurable confirmation-page path.
+
+= 0.3.x =
+* Customizable status messages, floating dismissible toast notice, magic-link issuance/consumption logging, time-based log retention.
+
+= 0.3.0 =
+* Initial tracked release: passwordless magic-link auth with rate limiting, Cloudflare Turnstile, and a protected page, via shortcode and Elementor Pro form action.
