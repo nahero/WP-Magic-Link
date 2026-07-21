@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.8.0
+ * Version: 0.9.0
  * Requires at least: 6.0
  * Requires PHP: 8.4
  * Text Domain: msv-magic-link-auth
@@ -33,11 +33,19 @@ final class MSV_Magic_Link_Auth {
     private const UPDATE_RELEASE_NEGATIVE_TTL = 5 * MINUTE_IN_SECONDS;
     private const DISPOSABLE_OPTION_KEY = 'msv_magic_link_auth_disposable';
     private const DISPOSABLE_BLOCKLIST_URL = 'https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/main/disposable_email_blocklist.conf';
+    private const TOTALPOLL_SCHEDULE_OPTION_KEY = 'msv_magic_link_auth_totalpoll_schedule';
+    private const VOTER_DELETE_SCHEDULE_OPTION_KEY = 'msv_magic_link_auth_voter_delete_schedule';
+    private const VOTER_CREATED_META_KEY = '_msv_magic_link_voter';
+    private const TOTALPOLL_CRON_HOOK = 'msv_magic_link_totalpoll_purge_cron';
+    private const VOTER_DELETE_CRON_HOOK = 'msv_magic_link_voter_delete_cron';
 
     private static ?self $instance = null;
 
     public function __construct() {
         self::$instance = $this;
+
+        register_activation_hook(__FILE__, [$this, 'handle_activation']);
+        register_deactivation_hook(__FILE__, [$this, 'handle_deactivation']);
 
         add_action('init', [$this, 'load_textdomain']);
         add_shortcode('msv_magic_link_form', [$this, 'render_form_shortcode']);
@@ -52,6 +60,8 @@ final class MSV_Magic_Link_Auth {
         add_action('wp_footer', [$this, 'render_confirm_button']);
         add_filter('pre_set_site_transient_update_plugins', [$this, 'check_for_update']);
         add_filter('plugins_api', [$this, 'plugins_api_handler'], 10, 3);
+        add_action(self::TOTALPOLL_CRON_HOOK, [$this, 'run_scheduled_totalpoll_purge']);
+        add_action(self::VOTER_DELETE_CRON_HOOK, [$this, 'run_scheduled_voter_delete']);
     }
 
     public static function instance(): self {
@@ -60,6 +70,22 @@ final class MSV_Magic_Link_Auth {
 
     public function load_textdomain(): void {
         load_plugin_textdomain('msv-magic-link-auth', false, dirname(plugin_basename(__FILE__)) . '/languages');
+    }
+
+    /**
+     * Restores any pending scheduled runs from saved config. Runs on every
+     * activation (including a deactivate/reactivate cycle weeks later), not
+     * just the first install, so cron continuity survives a toggle without
+     * requiring the admin to revisit the settings screen.
+     */
+    public function handle_activation(): void {
+        $this->arm_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY, self::TOTALPOLL_CRON_HOOK);
+        $this->arm_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY, self::VOTER_DELETE_CRON_HOOK);
+    }
+
+    public function handle_deactivation(): void {
+        wp_clear_scheduled_hook(self::TOTALPOLL_CRON_HOOK);
+        wp_clear_scheduled_hook(self::VOTER_DELETE_CRON_HOOK);
     }
 
     public static function defaults(): array {
@@ -89,6 +115,7 @@ final class MSV_Magic_Link_Auth {
             'log_retention_days' => 3,
             'totalpoll_table_suffix' => 'totalpoll_log',
             'totalpoll_ip_column' => 'ip',
+            'voter_delete_match_mode' => 'role',
         ];
     }
 
@@ -158,6 +185,125 @@ final class MSV_Magic_Link_Auth {
         }));
 
         update_option(self::LOG_OPTION_KEY, array_slice($log, 0, self::LOG_HARD_CAP), false);
+    }
+
+    private static function schedule_defaults(): array {
+        return [
+            'mode' => 'off', // 'off' | 'once' | 'repeating'
+            'once_at' => '',
+            'repeat_start_at' => '',
+            'repeat_interval_days' => 7,
+            'repeat_end_at' => '',
+            'next_run_ts' => null,
+            'last_run_ts' => null,
+            'last_run_status' => '',
+            'last_run_message' => '',
+        ];
+    }
+
+    private function get_schedule(string $option_key): array {
+        return wp_parse_args(get_option($option_key, []), self::schedule_defaults());
+    }
+
+    /**
+     * Parses a datetime-local input value ("Y-m-d\TH:i") as literal
+     * site-local wall-clock time (never the browser's own timezone).
+     * Returns null if unparseable/blank.
+     */
+    private function parse_site_local_datetime_object(string $raw): ?DateTime {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+
+        try {
+            return new DateTime(str_replace('T', ' ', $raw), wp_timezone());
+        } catch (Exception $e) {
+            return null;
+        }
+    }
+
+    private function parse_site_local_datetime(string $raw): ?int {
+        $date = $this->parse_site_local_datetime_object($raw);
+        return $date instanceof DateTime ? $date->getTimestamp() : null;
+    }
+
+    /**
+     * Finds the first occurrence of a "every N days, starting at
+     * $start_at_local, no later than $end_at_local" schedule that falls
+     * strictly after $after_ts. Walks whole calendar days via DateInterval
+     * on a timezone-aware DateTime (not raw N*86400 arithmetic) so a
+     * DST transition can't shift the wall-clock time of day or cause drift.
+     * Returns null once the window has elapsed - the caller treats that as
+     * "nothing left to schedule", not an error.
+     */
+    private function compute_next_occurrence_ts(string $start_at_local, int $interval_days, string $end_at_local, int $after_ts): ?int {
+        $interval_days = max(1, $interval_days);
+
+        $cursor = $this->parse_site_local_datetime_object($start_at_local);
+        $end_ts = $this->parse_site_local_datetime($end_at_local);
+        if ($cursor === null || $end_ts === null) {
+            return null;
+        }
+        $start_ts = $cursor->getTimestamp();
+        if ($end_ts < $start_ts) {
+            return null;
+        }
+
+        if ($start_ts > $after_ts) {
+            $next_ts = $start_ts;
+        } else {
+            // $steps counts whole INTERVALS elapsed since start, so the walk
+            // must advance $steps * $interval_days days, not $steps days.
+            $steps = (int) ceil(($after_ts - $start_ts) / ($interval_days * DAY_IN_SECONDS));
+            $cursor->add(new DateInterval('P' . ($steps * $interval_days) . 'D'));
+            $next_ts = $cursor->getTimestamp();
+            if ($next_ts <= $after_ts) {
+                $cursor->add(new DateInterval('P' . $interval_days . 'D'));
+                $next_ts = $cursor->getTimestamp();
+            }
+        }
+
+        return $next_ts <= $end_ts ? $next_ts : null;
+    }
+
+    /**
+     * Re-derives and (re)schedules the single next WP-Cron event for a
+     * schedule option, always clearing any stale pending event first so
+     * re-arming is idempotent and safe to call after every save and on
+     * every plugin activation. A lapsed 'once' schedule (its time already
+     * passed) is intentionally left unscheduled rather than fired
+     * immediately - critical so reactivating the plugin long after a
+     * forgotten one-time schedule can't suddenly trigger a destructive
+     * action moments after reactivation.
+     */
+    private function arm_schedule(string $option_key, string $cron_hook): void {
+        $schedule = $this->get_schedule($option_key);
+        wp_clear_scheduled_hook($cron_hook);
+
+        $next_run_ts = null;
+
+        if ($schedule['mode'] === 'once') {
+            $ts = $this->parse_site_local_datetime($schedule['once_at']);
+            if ($ts !== null && $ts > time()) {
+                wp_schedule_single_event($ts, $cron_hook);
+                $next_run_ts = $ts;
+            }
+        } elseif ($schedule['mode'] === 'repeating') {
+            $ts = $this->compute_next_occurrence_ts(
+                $schedule['repeat_start_at'],
+                (int) $schedule['repeat_interval_days'],
+                $schedule['repeat_end_at'],
+                time()
+            );
+            if ($ts !== null) {
+                wp_schedule_single_event($ts, $cron_hook);
+                $next_run_ts = $ts;
+            }
+        }
+
+        $schedule['next_run_ts'] = $next_run_ts;
+        update_option($option_key, $schedule, false);
     }
 
     public function render_form_shortcode(): string {
@@ -383,6 +529,11 @@ final class MSV_Magic_Link_Auth {
             $user = get_user_by('id', $user_id);
             if ($user instanceof WP_User) {
                 $user->set_role('subscriber');
+                // Tags accounts this plugin creates, going forward only (not
+                // retroactive), so the "delete all voters" maintenance action
+                // can optionally target exactly these accounts instead of
+                // every Subscriber-role user on the site - see get_voter_user_ids_by_tag().
+                update_user_meta($user->ID, self::VOTER_CREATED_META_KEY, time());
             }
         }
 
@@ -1343,6 +1494,90 @@ final class MSV_Magic_Link_Auth {
     }
 
     /**
+     * Renders the shared mode/once/repeating schedule fieldset used by both
+     * the TotalPoll purge schedule and the voter-deletion schedule - same
+     * field shape, different $_POST field-name prefix (see
+     * save_schedule_from_post()) and save-button name.
+     */
+    private function render_schedule_fieldset(string $field_prefix, array $schedule, string $save_button_name, string $legend): string {
+        $format_ts = static function (?int $ts, string $never_label): string {
+            return $ts === null ? $never_label : wp_date('Y-m-d H:i', $ts);
+        };
+
+        ob_start();
+        ?>
+        <fieldset class="msv-schedule-fieldset" data-schedule-prefix="<?php echo esc_attr($field_prefix); ?>">
+            <legend><?php echo esc_html($legend); ?></legend>
+            <p class="description">
+                <?php
+                printf(
+                    /* translators: %s: site timezone name, e.g. Europe/Zurich */
+                    esc_html__('Times below are in your site\'s timezone (%s).', 'msv-magic-link-auth'),
+                    esc_html(wp_timezone()->getName())
+                );
+                ?>
+            </p>
+            <label>
+                <input type="radio" class="msv-schedule-mode-radio" name="<?php echo esc_attr($field_prefix); ?>_schedule_mode" value="off" <?php checked($schedule['mode'], 'off'); ?>>
+                <?php esc_html_e('Manual only (no automatic schedule)', 'msv-magic-link-auth'); ?>
+            </label><br>
+            <label>
+                <input type="radio" class="msv-schedule-mode-radio" name="<?php echo esc_attr($field_prefix); ?>_schedule_mode" value="once" <?php checked($schedule['mode'], 'once'); ?>>
+                <?php esc_html_e('Run once at a specific date and time', 'msv-magic-link-auth'); ?>
+            </label>
+            <div class="msv-schedule-group" data-schedule-group="once" <?php echo $schedule['mode'] !== 'once' ? 'hidden' : ''; ?>>
+                <input type="datetime-local" name="<?php echo esc_attr($field_prefix); ?>_once_at" value="<?php echo esc_attr($schedule['once_at']); ?>">
+            </div>
+            <label>
+                <input type="radio" class="msv-schedule-mode-radio" name="<?php echo esc_attr($field_prefix); ?>_schedule_mode" value="repeating" <?php checked($schedule['mode'], 'repeating'); ?>>
+                <?php esc_html_e('Repeat automatically', 'msv-magic-link-auth'); ?>
+            </label>
+            <div class="msv-schedule-group" data-schedule-group="repeating" <?php echo $schedule['mode'] !== 'repeating' ? 'hidden' : ''; ?>>
+                <?php
+                printf(
+                    /* translators: 1: number-of-days input, 2: start date/time input, 3: end date/time input */
+                    esc_html__('Every %1$s days, from %2$s to %3$s', 'msv-magic-link-auth'),
+                    '<input type="number" min="1" style="width:5em" name="' . esc_attr($field_prefix) . '_repeat_interval_days" value="' . esc_attr((string) max(1, (int) $schedule['repeat_interval_days'])) . '">',
+                    '<input type="datetime-local" name="' . esc_attr($field_prefix) . '_repeat_start_at" value="' . esc_attr($schedule['repeat_start_at']) . '">',
+                    '<input type="datetime-local" name="' . esc_attr($field_prefix) . '_repeat_end_at" value="' . esc_attr($schedule['repeat_end_at']) . '">'
+                );
+                ?>
+            </div>
+        </fieldset>
+        <p class="description">
+            <?php
+            printf(
+                /* translators: %s: formatted next-run date/time, or "Not scheduled" */
+                esc_html__('Next scheduled run: %s', 'msv-magic-link-auth'),
+                '<strong>' . esc_html($format_ts($schedule['next_run_ts'], __('Not scheduled', 'msv-magic-link-auth'))) . '</strong>'
+            );
+            ?>
+            <br>
+            <?php if ($schedule['last_run_ts'] !== null): ?>
+                <?php
+                printf(
+                    /* translators: 1: formatted last-run date/time, 2: status word (success/error/skipped), 3: short diagnostic message */
+                    esc_html__('Last run: %1$s — %2$s (%3$s)', 'msv-magic-link-auth'),
+                    esc_html($format_ts($schedule['last_run_ts'], '')),
+                    esc_html($schedule['last_run_status']),
+                    esc_html($schedule['last_run_message'])
+                );
+                ?>
+            <?php else: ?>
+                <?php esc_html_e('Last run: never.', 'msv-magic-link-auth'); ?>
+            <?php endif; ?>
+        </p>
+        <?php if ($schedule['mode'] !== 'off' && defined('DISABLE_WP_CRON') && DISABLE_WP_CRON): ?>
+            <div class="notice notice-warning inline"><p><?php esc_html_e('WP-Cron is disabled on this site (DISABLE_WP_CRON), so this schedule will not run unless a real system cron job is configured to trigger it.', 'msv-magic-link-auth'); ?></p></div>
+        <?php endif; ?>
+        <p>
+            <button type="submit" name="<?php echo esc_attr($save_button_name); ?>" value="1" form="msv-settings-form" class="button"><?php esc_html_e('Save schedule', 'msv-magic-link-auth'); ?></button>
+        </p>
+        <?php
+        return ob_get_clean();
+    }
+
+    /**
      * Locates TotalPoll Pro's raw vote-log table (holds voter IP + user
      * agent per vote action, separate from the aggregate vote-count table).
      * The table prefix always comes from $wpdb->prefix - never hardcoded -
@@ -1416,12 +1651,207 @@ final class MSV_Magic_Link_Auth {
         return (int) $affected;
     }
 
+    private function persist_totalpoll_table_settings(string $suffix, string $column): void {
+        $existing = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaults());
+        $existing['totalpoll_table_suffix'] = $suffix;
+        $existing['totalpoll_ip_column'] = $column;
+        update_option(self::OPTION_KEY, $existing);
+    }
+
+    public function run_scheduled_totalpoll_purge(): void {
+        $settings = self::settings();
+        $table = $this->get_totalpoll_log_table($settings['totalpoll_table_suffix'], $settings['totalpoll_ip_column']);
+
+        $schedule = $this->get_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY);
+
+        if ($table === null) {
+            $this->log_event('warning', 'Scheduled TotalPoll IP purge skipped: table/column not found.');
+            $schedule['last_run_status'] = 'skipped';
+            $schedule['last_run_message'] = 'Table/column not found.';
+        } else {
+            $result = $this->clear_totalpoll_ips($table, $settings['totalpoll_ip_column']);
+            if (is_wp_error($result)) {
+                $schedule['last_run_status'] = 'error';
+                $schedule['last_run_message'] = $result->get_error_message();
+            } else {
+                $schedule['last_run_status'] = 'success';
+                $schedule['last_run_message'] = $result . ' row(s) cleared.';
+            }
+        }
+
+        $schedule['last_run_ts'] = time();
+        update_option(self::TOTALPOLL_SCHEDULE_OPTION_KEY, $schedule, false);
+
+        // Re-arms from the freshly-saved state; for a repeating schedule this
+        // computes and schedules the next occurrence (or leaves it unscheduled
+        // once the end date has passed) - for 'once' this just consumes it.
+        $this->arm_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY, self::TOTALPOLL_CRON_HOOK);
+    }
+
+    /**
+     * Returns every user whose role is EXACTLY ['subscriber'] - never a user
+     * who also holds another role (admin/editor/etc via some other plugin),
+     * since WP_User_Query's 'role' param matches "has this role among
+     * possibly others", not an exact-match. This same exactness check is
+     * applied for both matching modes below, including tag-based, since a
+     * tag only records how an account was created, not its current role.
+     */
+    private function get_voter_user_ids_by_role(): array {
+        $users = get_users(['role' => 'subscriber', 'fields' => 'all']);
+        $ids = [];
+        foreach ($users as $user) {
+            if ($user->roles === ['subscriber']) {
+                $ids[] = $user->ID;
+            }
+        }
+        return $ids;
+    }
+
+    private function get_voter_user_ids_by_tag(): array {
+        $candidate_ids = get_users([
+            'meta_key' => self::VOTER_CREATED_META_KEY,
+            'fields' => 'ID',
+        ]);
+        if (empty($candidate_ids)) {
+            return [];
+        }
+
+        $users = get_users(['include' => $candidate_ids, 'fields' => 'all']);
+        $ids = [];
+        foreach ($users as $user) {
+            if ($user->roles === ['subscriber']) {
+                $ids[] = $user->ID;
+            }
+        }
+        return $ids;
+    }
+
+    private function get_voter_user_ids(string $match_mode): array {
+        return $match_mode === 'tag' ? $this->get_voter_user_ids_by_tag() : $this->get_voter_user_ids_by_role();
+    }
+
+    /**
+     * Displayed as a live preview on the settings page, which (since tabs are
+     * shown/hidden client-side with no re-fetch) renders unconditionally on
+     * every page load regardless of which tab is active. get_users() can be
+     * a heavy query on a site with many accounts, so the preview count is
+     * cached briefly - this only affects what's displayed; delete_voters()
+     * always re-fetches its own fresh candidate list and never trusts this
+     * cached number.
+     */
+    public function count_voters(string $match_mode): int {
+        $cache_key = 'msv_magic_link_voter_count_' . $match_mode;
+        $cached = get_transient($cache_key);
+        if ($cached !== false) {
+            return (int) $cached;
+        }
+
+        $count = count($this->get_voter_user_ids($match_mode));
+        set_transient($cache_key, $count, MINUTE_IN_SECONDS);
+
+        return $count;
+    }
+
+    /**
+     * Always re-fetches its own candidate list rather than accepting one
+     * from a caller, so a stale on-page preview count can never cause a
+     * mismatch between what was shown and what actually gets deleted -
+     * the live count and the deletion always see the same fresh query.
+     * Single-site only (no multisite wpmu_delete_user() handling).
+     */
+    public function delete_voters(string $match_mode): int {
+        if (!function_exists('wp_delete_user')) {
+            require_once ABSPATH . 'wp-admin/includes/user.php';
+        }
+
+        $ids = $this->get_voter_user_ids($match_mode);
+        $deleted = 0;
+        foreach ($ids as $id) {
+            if (wp_delete_user($id)) {
+                $deleted++;
+            }
+        }
+
+        $this->log_event('info', 'Voter accounts deleted (' . $match_mode . ' match): ' . $deleted . ' of ' . count($ids) . ' candidate(s).');
+
+        return $deleted;
+    }
+
+    public function run_scheduled_voter_delete(): void {
+        $settings = self::settings();
+        $schedule = $this->get_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY);
+
+        $deleted = $this->delete_voters($settings['voter_delete_match_mode']);
+        $schedule['last_run_status'] = 'success';
+        $schedule['last_run_message'] = $deleted . ' voter account(s) deleted.';
+        $schedule['last_run_ts'] = time();
+        update_option(self::VOTER_DELETE_SCHEDULE_OPTION_KEY, $schedule, false);
+
+        $this->arm_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY, self::VOTER_DELETE_CRON_HOOK);
+    }
+
+    /**
+     * Shared save handler for both schedule forms (identical field shape,
+     * different $_POST field-name prefix). Only rejects genuinely blank or
+     * unparseable input - a semantically infeasible-but-well-formed schedule
+     * (end date before start date, a one-time date already in the past) is
+     * saved as typed and simply resolves to "nothing scheduled" via
+     * arm_schedule(), visible immediately in the next-run status line,
+     * rather than being blocked here. Returns an error message, or '' on
+     * success.
+     */
+    private function save_schedule_from_post(string $option_key, string $cron_hook, string $field_prefix): string {
+        $existing = $this->get_schedule($option_key);
+
+        $mode = sanitize_key(wp_unslash($_POST[$field_prefix . '_schedule_mode'] ?? 'off'));
+        if (!in_array($mode, ['off', 'once', 'repeating'], true)) {
+            $mode = 'off';
+        }
+
+        // A field belonging to a mode other than the one currently selected
+        // may legitimately be absent from $_POST (disabled by JS to match
+        // the active mode) - fall back to the previously-stored value rather
+        // than blanking it, exactly like the Turnstile-keys/dev-mode fields
+        // elsewhere on this page.
+        $once_at = array_key_exists($field_prefix . '_once_at', $_POST)
+            ? sanitize_text_field(wp_unslash($_POST[$field_prefix . '_once_at']))
+            : $existing['once_at'];
+        $repeat_start_at = array_key_exists($field_prefix . '_repeat_start_at', $_POST)
+            ? sanitize_text_field(wp_unslash($_POST[$field_prefix . '_repeat_start_at']))
+            : $existing['repeat_start_at'];
+        $repeat_end_at = array_key_exists($field_prefix . '_repeat_end_at', $_POST)
+            ? sanitize_text_field(wp_unslash($_POST[$field_prefix . '_repeat_end_at']))
+            : $existing['repeat_end_at'];
+        $repeat_interval_days = array_key_exists($field_prefix . '_repeat_interval_days', $_POST)
+            ? max(1, absint($_POST[$field_prefix . '_repeat_interval_days']))
+            : $existing['repeat_interval_days'];
+
+        if ($mode === 'once' && $this->parse_site_local_datetime($once_at) === null) {
+            return __('Could not save the schedule: please choose a valid date and time.', 'msv-magic-link-auth');
+        }
+        if ($mode === 'repeating' && ($this->parse_site_local_datetime($repeat_start_at) === null || $this->parse_site_local_datetime($repeat_end_at) === null)) {
+            return __('Could not save the schedule: please choose valid start and end dates.', 'msv-magic-link-auth');
+        }
+
+        $schedule = $existing;
+        $schedule['mode'] = $mode;
+        $schedule['once_at'] = $once_at;
+        $schedule['repeat_start_at'] = $repeat_start_at;
+        $schedule['repeat_interval_days'] = $repeat_interval_days;
+        $schedule['repeat_end_at'] = $repeat_end_at;
+        update_option($option_key, $schedule, false);
+
+        $this->arm_schedule($option_key, $cron_hook);
+
+        return '';
+    }
+
     public function render_settings_page(): void {
         if (!current_user_can('manage_options')) {
             return;
         }
 
-        $tabs = ['setup', 'email', 'messaging', 'log'];
+        $tabs = ['setup', 'email', 'messaging', 'maintenance', 'log'];
         $notice = '';
         $error_notice = '';
 
@@ -1462,10 +1892,41 @@ final class MSV_Magic_Link_Auth {
 
                 // Persist the (possibly just-adjusted) table/column names for
                 // next time, regardless of whether the clear itself succeeded.
-                $existing_for_tp = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaults());
-                $existing_for_tp['totalpoll_table_suffix'] = $tp_suffix;
-                $existing_for_tp['totalpoll_ip_column'] = $tp_column;
-                update_option(self::OPTION_KEY, $existing_for_tp);
+                $this->persist_totalpoll_table_settings($tp_suffix, $tp_column);
+            } elseif (isset($_POST['msv_magic_check_totalpoll'])) {
+                $tp_suffix = sanitize_text_field(wp_unslash($_POST['totalpoll_table_suffix'] ?? 'totalpoll_log'));
+                $tp_column = sanitize_text_field(wp_unslash($_POST['totalpoll_ip_column'] ?? 'ip'));
+                $this->persist_totalpoll_table_settings($tp_suffix, $tp_column);
+
+                $tp_table = $this->get_totalpoll_log_table($tp_suffix, $tp_column);
+                if ($tp_table === null) {
+                    $error_notice = __('Checks failed: could not find that table/column. Check the table name and column name below.', 'msv-magic-link-auth');
+                } else {
+                    $notice = sprintf(
+                        /* translators: 1: database table name, 2: number of rows currently storing an IP address */
+                        __('Checks passed: table %1$s found, %2$d entries currently store an IP address.', 'msv-magic-link-auth'),
+                        $tp_table,
+                        $this->count_totalpoll_ips($tp_table, $tp_column)
+                    );
+                }
+            } elseif (isset($_POST['msv_magic_save_totalpoll_schedule'])) {
+                $error_notice = $this->save_schedule_from_post(self::TOTALPOLL_SCHEDULE_OPTION_KEY, self::TOTALPOLL_CRON_HOOK, 'totalpoll');
+                if ($error_notice === '') {
+                    $notice = __('IP-purge schedule saved.', 'msv-magic-link-auth');
+                }
+            } elseif (isset($_POST['msv_magic_save_voter_delete_schedule'])) {
+                $error_notice = $this->save_schedule_from_post(self::VOTER_DELETE_SCHEDULE_OPTION_KEY, self::VOTER_DELETE_CRON_HOOK, 'voter_delete');
+                if ($error_notice === '') {
+                    $notice = __('Voter-deletion schedule saved.', 'msv-magic-link-auth');
+                }
+            } elseif (isset($_POST['msv_magic_delete_voters_now'])) {
+                $match_mode = sanitize_key(wp_unslash($_POST['voter_delete_match_mode'] ?? self::settings()['voter_delete_match_mode']));
+                if (!in_array($match_mode, ['role', 'tag'], true)) {
+                    $match_mode = 'role';
+                }
+                $deleted = $this->delete_voters($match_mode);
+                /* translators: %d: number of accounts deleted */
+                $notice = sprintf(__('Deleted %d voter account(s).', 'msv-magic-link-auth'), $deleted);
             } else {
                 // Existing stored values, used as the fallback whenever a field
                 // is absent from $_POST - this happens legitimately for any
@@ -1521,6 +1982,9 @@ final class MSV_Magic_Link_Auth {
                     'log_retention_days' => max(1, absint($_POST['log_retention_days'] ?? 3)),
                     'totalpoll_table_suffix' => sanitize_text_field(wp_unslash($_POST['totalpoll_table_suffix'] ?? 'totalpoll_log')),
                     'totalpoll_ip_column' => sanitize_text_field(wp_unslash($_POST['totalpoll_ip_column'] ?? 'ip')),
+                    'voter_delete_match_mode' => in_array($_POST['voter_delete_match_mode'] ?? '', ['role', 'tag'], true)
+                        ? sanitize_key($_POST['voter_delete_match_mode'])
+                        : $existing['voter_delete_match_mode'],
                 ]);
                 $notice = __('Settings saved.', 'msv-magic-link-auth');
             }
@@ -1586,6 +2050,7 @@ final class MSV_Magic_Link_Auth {
                 <button type="button" class="nav-tab<?php echo $initial_tab === 'setup' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-setup" aria-controls="msv-tab-setup" aria-selected="<?php echo $initial_tab === 'setup' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'setup' ? '0' : '-1'; ?>" data-msv-tab-target="setup"><?php esc_html_e('Setup', 'msv-magic-link-auth'); ?></button>
                 <button type="button" class="nav-tab<?php echo $initial_tab === 'email' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-email" aria-controls="msv-tab-email" aria-selected="<?php echo $initial_tab === 'email' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'email' ? '0' : '-1'; ?>" data-msv-tab-target="email"><?php esc_html_e('Email & Blocklist', 'msv-magic-link-auth'); ?></button>
                 <button type="button" class="nav-tab<?php echo $initial_tab === 'messaging' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-messaging" aria-controls="msv-tab-messaging" aria-selected="<?php echo $initial_tab === 'messaging' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'messaging' ? '0' : '-1'; ?>" data-msv-tab-target="messaging"><?php esc_html_e('Messaging', 'msv-magic-link-auth'); ?></button>
+                <button type="button" class="nav-tab<?php echo $initial_tab === 'maintenance' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-maintenance" aria-controls="msv-tab-maintenance" aria-selected="<?php echo $initial_tab === 'maintenance' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'maintenance' ? '0' : '-1'; ?>" data-msv-tab-target="maintenance"><?php esc_html_e('Maintenance', 'msv-magic-link-auth'); ?></button>
                 <button type="button" class="nav-tab<?php echo $initial_tab === 'log' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-log" aria-controls="msv-tab-log" aria-selected="<?php echo $initial_tab === 'log' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'log' ? '0' : '-1'; ?>" data-msv-tab-target="log"><?php esc_html_e('Log', 'msv-magic-link-auth'); ?></button>
             </h2>
 
@@ -1755,16 +2220,7 @@ final class MSV_Magic_Link_Auth {
                     </table>
                 </div>
 
-                <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log" role="tabpanel" aria-labelledby="msv-tab-btn-log" tabindex="0" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
-                    <h2><?php esc_html_e('Log retention', 'msv-magic-link-auth'); ?></h2>
-                    <table class="form-table" role="presentation">
-                        <tr>
-                            <th scope="row"><label for="log_retention_days"><?php esc_html_e('Keep log entries for (days)', 'msv-magic-link-auth'); ?></label></th>
-                            <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
-                        </tr>
-                    </table>
-
-                    <hr>
+                <div class="msv-tab-panel" data-msv-tab="maintenance" id="msv-tab-maintenance" role="tabpanel" aria-labelledby="msv-tab-btn-maintenance" tabindex="0" <?php echo $initial_tab !== 'maintenance' ? 'hidden' : ''; ?>>
                     <h2><?php esc_html_e('TotalPoll voter IP cleanup', 'msv-magic-link-auth'); ?></h2>
                     <p class="description">
                         <?php esc_html_e('TotalPoll Pro logs each voter\'s IP address alongside every vote. This clears just the IP address from that log after voting closes. Vote counts and results are stored in a completely separate table with no personal data and are never affected.', 'msv-magic-link-auth'); ?>
@@ -1799,6 +2255,13 @@ final class MSV_Magic_Link_Auth {
                     <p>
                         <button
                             type="submit"
+                            name="msv_magic_check_totalpoll"
+                            value="1"
+                            form="msv-settings-form"
+                            class="button"
+                        ><?php esc_html_e('Run checks now', 'msv-magic-link-auth'); ?></button>
+                        <button
+                            type="submit"
                             name="msv_magic_clear_totalpoll_ips"
                             value="1"
                             form="msv-settings-form"
@@ -1807,6 +2270,95 @@ final class MSV_Magic_Link_Auth {
                             onclick="return confirm(<?php echo esc_attr(wp_json_encode(__('This will permanently clear all voter IP addresses from the TotalPoll log. This cannot be undone. Only do this after voting has fully closed. Continue?', 'msv-magic-link-auth'))); ?>);"
                         ><?php esc_html_e('Clear TotalPoll voter IPs now', 'msv-magic-link-auth'); ?></button>
                     </p>
+
+                    <h3><?php esc_html_e('Automatic purge schedule', 'msv-magic-link-auth'); ?></h3>
+                    <?php
+                    echo $this->render_schedule_fieldset(
+                        'totalpoll',
+                        $this->get_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY),
+                        'msv_magic_save_totalpoll_schedule',
+                        __('When to purge automatically', 'msv-magic-link-auth')
+                    );
+                    ?>
+
+                    <hr>
+                    <h2><?php esc_html_e('Delete all voters', 'msv-magic-link-auth'); ?></h2>
+                    <p class="description">
+                        <?php esc_html_e('Permanently deletes WordPress accounts. Choose which accounts count as "voters" below, then use the manual button or an automatic schedule to remove them once you no longer need their accounts (for example, after voting has fully closed).', 'msv-magic-link-auth'); ?>
+                    </p>
+                    <?php $voter_role_count = $this->count_voters('role'); $voter_tag_count = $this->count_voters('tag'); ?>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><?php esc_html_e('Which accounts to delete', 'msv-magic-link-auth'); ?></th>
+                            <td>
+                                <label>
+                                    <input type="radio" name="voter_delete_match_mode" value="role" <?php checked($settings['voter_delete_match_mode'], 'role'); ?>>
+                                    <?php
+                                    printf(
+                                        /* translators: %d: number of matching accounts */
+                                        esc_html__('Every account whose only role is Subscriber (%d account(s)). Never touches administrators, editors, or any other multi-role account. Includes accounts that already existed before this feature was added.', 'msv-magic-link-auth'),
+                                        (int) $voter_role_count
+                                    );
+                                    ?>
+                                </label><br>
+                                <label>
+                                    <input type="radio" name="voter_delete_match_mode" value="tag" <?php checked($settings['voter_delete_match_mode'], 'tag'); ?>>
+                                    <?php
+                                    printf(
+                                        /* translators: %d: number of matching accounts */
+                                        esc_html__('Only accounts this plugin itself created (%d account(s)). Safer on a site that also uses the Subscriber role for other members, but cannot include accounts created before this feature was added.', 'msv-magic-link-auth'),
+                                        (int) $voter_tag_count
+                                    );
+                                    ?>
+                                </label>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php
+                    $voter_confirm_role = sprintf(
+                        /* translators: %d: number of matching accounts */
+                        __('This will permanently delete %d account(s) matching "every Subscriber-only account". This cannot be undone. Continue?', 'msv-magic-link-auth'),
+                        $voter_role_count
+                    );
+                    $voter_confirm_tag = sprintf(
+                        /* translators: %d: number of matching accounts */
+                        __('This will permanently delete %d account(s) matching "accounts created by this plugin". This cannot be undone. Continue?', 'msv-magic-link-auth'),
+                        $voter_tag_count
+                    );
+                    ?>
+                    <p>
+                        <button
+                            type="submit"
+                            name="msv_magic_delete_voters_now"
+                            value="1"
+                            form="msv-settings-form"
+                            class="button"
+                            id="msv-delete-voters-btn"
+                            data-confirm-role="<?php echo esc_attr($voter_confirm_role); ?>"
+                            data-confirm-tag="<?php echo esc_attr($voter_confirm_tag); ?>"
+                            <?php echo ($settings['voter_delete_match_mode'] === 'tag' ? $voter_tag_count : $voter_role_count) === 0 ? 'disabled' : ''; ?>
+                        ><?php esc_html_e('Delete all voters now', 'msv-magic-link-auth'); ?></button>
+                    </p>
+
+                    <h3><?php esc_html_e('Automatic deletion schedule', 'msv-magic-link-auth'); ?></h3>
+                    <?php
+                    echo $this->render_schedule_fieldset(
+                        'voter_delete',
+                        $this->get_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY),
+                        'msv_magic_save_voter_delete_schedule',
+                        __('When to delete automatically', 'msv-magic-link-auth')
+                    );
+                    ?>
+                </div>
+
+                <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log" role="tabpanel" aria-labelledby="msv-tab-btn-log" tabindex="0" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
+                    <h2><?php esc_html_e('Log retention', 'msv-magic-link-auth'); ?></h2>
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row"><label for="log_retention_days"><?php esc_html_e('Keep log entries for (days)', 'msv-magic-link-auth'); ?></label></th>
+                            <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
+                        </tr>
+                    </table>
                 </div>
             </form>
 
@@ -1858,7 +2410,7 @@ final class MSV_Magic_Link_Auth {
             </style>
             <script>
             (function () {
-                var TABS = ['setup', 'email', 'messaging', 'log'];
+                var TABS = ['setup', 'email', 'messaging', 'maintenance', 'log'];
 
                 function activateTab(tab, skipHistory) {
                     if (TABS.indexOf(tab) === -1) { tab = TABS[0]; }
@@ -1900,6 +2452,21 @@ final class MSV_Magic_Link_Auth {
                     input.style.display = select.value === '0' ? '' : 'none';
                 }
 
+                function syncScheduleFieldset(fieldset) {
+                    var checked = fieldset.querySelector('.msv-schedule-mode-radio:checked');
+                    var mode = checked ? checked.value : 'off';
+                    fieldset.querySelectorAll('.msv-schedule-group').forEach(function (group) {
+                        group.hidden = group.getAttribute('data-schedule-group') !== mode;
+                    });
+                }
+
+                function syncDeleteVotersButton() {
+                    var btn = document.getElementById('msv-delete-voters-btn');
+                    var checked = document.querySelector('input[name="voter_delete_match_mode"]:checked');
+                    if (!btn || !checked) { return; }
+                    btn.setAttribute('data-confirm-active', btn.getAttribute('data-confirm-' + checked.value) || '');
+                }
+
                 document.addEventListener('DOMContentLoaded', function () {
                     var devMode = document.getElementById('dev_mode');
                     var turnstile = document.getElementById('turnstile_enabled');
@@ -1915,6 +2482,27 @@ final class MSV_Magic_Link_Auth {
                         }
                         syncPagePicker(pair[0], pair[1]);
                     });
+
+                    document.querySelectorAll('.msv-schedule-fieldset').forEach(function (fieldset) {
+                        fieldset.querySelectorAll('.msv-schedule-mode-radio').forEach(function (radio) {
+                            radio.addEventListener('change', function () { syncScheduleFieldset(fieldset); });
+                        });
+                        syncScheduleFieldset(fieldset);
+                    });
+
+                    document.querySelectorAll('input[name="voter_delete_match_mode"]').forEach(function (radio) {
+                        radio.addEventListener('change', syncDeleteVotersButton);
+                    });
+                    syncDeleteVotersButton();
+                    var deleteVotersBtn = document.getElementById('msv-delete-voters-btn');
+                    if (deleteVotersBtn) {
+                        deleteVotersBtn.addEventListener('click', function (e) {
+                            var message = deleteVotersBtn.getAttribute('data-confirm-active');
+                            if (message && !confirm(message)) {
+                                e.preventDefault();
+                            }
+                        });
+                    }
 
                     document.querySelectorAll('[data-msv-tab-target]').forEach(function (btn) {
                         btn.addEventListener('click', function () { activateTab(btn.getAttribute('data-msv-tab-target')); });

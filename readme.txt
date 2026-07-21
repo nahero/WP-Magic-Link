@@ -3,7 +3,7 @@ Contributors: igor@igibits.com
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.4
-Stable tag: 0.8.0
+Stable tag: 0.9.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -25,7 +25,9 @@ Core features:
 * **Works two ways** — a `[msv_magic_link_form]` shortcode, or an Elementor Pro form action ("Actions After Submit") for use inside an existing Elementor form.
 * **Editable, translatable messages** — every visitor-facing message is editable from the settings screen and follows your site's language via standard WordPress translation files.
 * **Built-in diagnostic log** — every issued/consumed/rejected link is logged with a non-reversible token fingerprint, requester IP, and user agent, pruned automatically by age.
-* **TotalPoll voter IP cleanup** — if TotalPoll Pro is installed, a button on the Log tab clears voter IP addresses from its log table once voting has closed, without touching vote counts or results. The table/column are auto-detected (and can be overridden) so this works regardless of your site's table prefix.
+* **TotalPoll voter IP cleanup** — if TotalPoll Pro is installed, a Maintenance-tab button clears voter IP addresses from its log table once voting has closed, without touching vote counts or results. The table/column are auto-detected (and can be overridden) so this works regardless of your site's table prefix, and a "Run checks now" button reports readiness before you rely on it.
+* **Delete all voters** — permanently removes voter accounts, either every Subscriber-only account or just the accounts this plugin itself created, whichever you choose. Manual button or automatic schedule.
+* **Scheduled maintenance** — both the TotalPoll IP cleanup and the delete-all-voters action can run manually, once at a chosen date/time, or repeating every N days between a start and end date, via WordPress's built-in cron.
 * **Self-updating from GitHub** — once installed, updates appear in the normal WordPress "Update plugin" flow.
 
 == Installation ==
@@ -55,6 +57,12 @@ Yes, on the Messaging tab. Every message shown to a visitor is editable, and if 
 In the WordPress options table, under option names prefixed `msv_magic_link_auth_`. Deleting the plugin (not just deactivating it) removes all of it, including any stored magic-link tokens and rate-limit counters.
 
 == Changelog ==
+
+= 0.9.0 =
+* New Maintenance tab, moved out of Log: the TotalPoll voter IP cleanup section now lives here, alongside a new "Run checks now" button that reports table/column readiness as a page notice.
+* Added scheduling for the TotalPoll IP purge: run manually, once at a chosen date/time, or repeating every N days between a start and end date, via WP-Cron. A lapsed one-time schedule is never auto-fired, even after reactivating the plugin.
+* Added a "Delete all voters" maintenance action: permanently deletes voter accounts, either every account whose only role is Subscriber, or only accounts this plugin itself created (tracked via a new usermeta tag going forward). Same manual/scheduled options as the IP purge, fully independent schedule.
+* Both destructive actions re-verify their preconditions at the moment they actually run (not just when scheduled), and log their outcome.
 
 = 0.8.0 =
 * Added a TotalPoll voter IP cleanup button (Log tab): clears voter IP addresses from TotalPoll Pro's log table after voting closes, leaving vote counts/results untouched. Table/column are auto-detected against your site's actual table prefix (never hardcoded) with an override for non-default table/column names, and the button stays disabled until a match is confirmed.

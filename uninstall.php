@@ -16,7 +16,23 @@ global $wpdb;
 delete_option('msv_magic_link_auth_settings');
 delete_option('msv_magic_link_auth_log');
 delete_option('msv_magic_link_auth_disposable');
+delete_option('msv_magic_link_auth_totalpoll_schedule');
+delete_option('msv_magic_link_auth_voter_delete_schedule');
 delete_transient('msv_magic_link_auth_gh_release');
+delete_transient('msv_magic_link_voter_count_role');
+delete_transient('msv_magic_link_voter_count_tag');
+
+// Defensive: deactivation already clears these, but a plugin can in theory
+// be deleted without a clean deactivation step (e.g. removed by hand from
+// wp-content/plugins while active), so clear them here too rather than
+// leaving an orphaned event pointing at a callback that can no longer load.
+wp_clear_scheduled_hook('msv_magic_link_totalpoll_purge_cron');
+wp_clear_scheduled_hook('msv_magic_link_voter_delete_cron');
+
+// Deliberately NOT touching the '_msv_magic_link_voter' usermeta or deleting
+// any WP_User rows here - uninstall's scope is plugin options/transients
+// only. Removing the plugin must never delete site content or user accounts
+// as a side effect.
 
 // Magic-link tokens and per-IP rate-limit counters are stored as transients
 // with a dynamic suffix (the token / the IP hash), so there's no fixed
