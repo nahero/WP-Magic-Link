@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.9.0
+ * Version: 0.9.1
  * Requires at least: 6.0
  * Requires PHP: 8.4
  * Text Domain: msv-magic-link-auth
@@ -1494,21 +1494,49 @@ final class MSV_Magic_Link_Auth {
     }
 
     /**
+     * A small help-icon trigger that reveals $text in a popover on click
+     * (or Enter/Space when focused) - a disclosure-button pattern rather
+     * than a hover tooltip, since hover alone is unusable on touch and
+     * awkward via keyboard. Used for per-field clarifications that would
+     * otherwise be a full <p class="description">; section-level intros
+     * stay inline instead of using this.
+     */
+    private function render_tooltip_icon(string $text, bool $align_right = false): string {
+        if ($text === '') {
+            return '';
+        }
+
+        static $n = 0;
+        $n++;
+        $id = 'msv-tooltip-' . $n;
+
+        return sprintf(
+            '<span class="msv-tooltip%4$s">'
+                . '<button type="button" class="msv-tooltip__trigger" aria-expanded="false" aria-controls="%1$s">'
+                    . '<span class="dashicons dashicons-editor-help" aria-hidden="true"></span>'
+                    . '<span class="screen-reader-text">%2$s</span>'
+                . '</button>'
+                . '<span class="msv-tooltip__bubble" id="%1$s" hidden>%3$s</span>'
+            . '</span>',
+            esc_attr($id),
+            esc_html__('More information', 'msv-magic-link-auth'),
+            esc_html($text),
+            $align_right ? ' msv-tooltip--align-right' : ''
+        );
+    }
+
+    /**
      * Renders the shared mode/once/repeating schedule fieldset used by both
      * the TotalPoll purge schedule and the voter-deletion schedule - same
      * field shape, different $_POST field-name prefix (see
      * save_schedule_from_post()) and save-button name.
      */
     private function render_schedule_fieldset(string $field_prefix, array $schedule, string $save_button_name, string $legend): string {
-        $format_ts = static function (?int $ts, string $never_label): string {
-            return $ts === null ? $never_label : wp_date('Y-m-d H:i', $ts);
-        };
-
         ob_start();
         ?>
         <fieldset class="msv-schedule-fieldset" data-schedule-prefix="<?php echo esc_attr($field_prefix); ?>">
-            <legend><?php echo esc_html($legend); ?></legend>
-            <p class="description">
+            <legend class="screen-reader-text"><?php echo esc_html($legend); ?></legend>
+            <p class="description msv-schedule-timezone-note" <?php echo $schedule['mode'] === 'off' ? 'hidden' : ''; ?>>
                 <?php
                 printf(
                     /* translators: %s: site timezone name, e.g. Europe/Zurich */
@@ -1544,31 +1572,34 @@ final class MSV_Magic_Link_Auth {
                 ?>
             </div>
         </fieldset>
+        <?php
+        $show_next_run = $schedule['next_run_ts'] !== null;
+        $show_last_run = $schedule['last_run_ts'] !== null;
+        ?>
+        <?php if ($show_next_run || $show_last_run): ?>
         <p class="description">
-            <?php
-            printf(
-                /* translators: %s: formatted next-run date/time, or "Not scheduled" */
-                esc_html__('Next scheduled run: %s', 'msv-magic-link-auth'),
-                '<strong>' . esc_html($format_ts($schedule['next_run_ts'], __('Not scheduled', 'msv-magic-link-auth'))) . '</strong>'
-            );
-            ?>
-            <br>
-            <?php if ($schedule['last_run_ts'] !== null): ?>
+            <?php if ($show_next_run): ?>
+                <?php
+                printf(
+                    /* translators: %s: formatted next-run date/time */
+                    esc_html__('Next scheduled run: %s', 'msv-magic-link-auth'),
+                    '<strong>' . esc_html(wp_date('Y-m-d H:i', $schedule['next_run_ts'])) . '</strong>'
+                );
+                ?>
+            <?php endif; ?>
+            <?php if ($show_next_run && $show_last_run): ?><br><?php endif; ?>
+            <?php if ($show_last_run): ?>
                 <?php
                 printf(
                     /* translators: 1: formatted last-run date/time, 2: status word (success/error/skipped), 3: short diagnostic message */
                     esc_html__('Last run: %1$s — %2$s (%3$s)', 'msv-magic-link-auth'),
-                    esc_html($format_ts($schedule['last_run_ts'], '')),
+                    esc_html(wp_date('Y-m-d H:i', $schedule['last_run_ts'])),
                     esc_html($schedule['last_run_status']),
                     esc_html($schedule['last_run_message'])
                 );
                 ?>
-            <?php else: ?>
-                <?php esc_html_e('Last run: never.', 'msv-magic-link-auth'); ?>
             <?php endif; ?>
         </p>
-        <?php if ($schedule['mode'] !== 'off' && defined('DISABLE_WP_CRON') && DISABLE_WP_CRON): ?>
-            <div class="notice notice-warning inline"><p><?php esc_html_e('WP-Cron is disabled on this site (DISABLE_WP_CRON), so this schedule will not run unless a real system cron job is configured to trigger it.', 'msv-magic-link-auth'); ?></p></div>
         <?php endif; ?>
         <p>
             <button type="submit" name="<?php echo esc_attr($save_button_name); ?>" value="1" form="msv-settings-form" class="button"><?php esc_html_e('Save schedule', 'msv-magic-link-auth'); ?></button>
@@ -2013,76 +2044,86 @@ final class MSV_Magic_Link_Auth {
         <div class="wrap msv-settings-wrap<?php echo is_admin_bar_showing() ? ' msv-has-adminbar' : ''; ?>">
 
             <div class="msv-sticky-header">
-                <h1><strong><?php esc_html_e('WP Magic Link Auth', 'msv-magic-link-auth'); ?></strong></h1>
-                <p><?php esc_html_e('Developed by igor@igibits.com', 'msv-magic-link-auth'); ?></p>
-                <?php if ($notice): ?>
-                    <div class="notice notice-success is-dismissible"><p><?php echo esc_html($notice); ?></p></div>
-                <?php endif; ?>
-                <?php if ($error_notice): ?>
-                    <div class="notice notice-error is-dismissible"><p><?php echo esc_html($error_notice); ?></p></div>
-                <?php endif; ?>
-                <?php if (!empty($settings['dev_mode'])): ?>
-                    <div class="notice notice-warning">
-                        <p>
-                            <?php
-                            printf(
-                                /* translators: 1: "Development mode is ON —" (bold), 2: number of minutes */
-                                esc_html__('%1$s Magic links expire after %2$d minute(s) regardless of the setting below. Turn this off before going live.', 'msv-magic-link-auth'),
-                                '<strong>' . esc_html__('Development mode is ON —', 'msv-magic-link-auth') . '</strong>',
-                                (int) max(1, absint($settings['dev_mode_minutes']))
-                            );
-                            ?>
-                        </p>
-                    </div>
-                <?php endif; ?>
-                <p style="display:flex;gap:8px;align-items:center;">
-                    <?php submit_button(__('Save settings', 'msv-magic-link-auth'), 'primary', 'submit', false, ['form' => 'msv-settings-form']); ?>
-                    <?php if ($update['available']): ?>
-                        <a href="<?php echo esc_url($update['url']); ?>" class="button"><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></a>
-                    <?php else: ?>
-                        <button type="button" class="button" disabled><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></button>
-                    <?php endif; ?>
-                </p>
-                <p class="description"><?php echo esc_html($update['message']); ?></p>
-            </div>
+                <div class="msv-sticky-header__row msv-sticky-header__row--title">
+                    <h1><strong><?php esc_html_e('WP Magic Link Auth', 'msv-magic-link-auth'); ?></strong></h1>
+                    <p><?php esc_html_e('Developed by igor@igibits.com', 'msv-magic-link-auth'); ?></p>
+                </div>
 
-            <h2 class="nav-tab-wrapper" role="tablist" aria-label="<?php esc_attr_e('Settings sections', 'msv-magic-link-auth'); ?>">
-                <button type="button" class="nav-tab<?php echo $initial_tab === 'setup' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-setup" aria-controls="msv-tab-setup" aria-selected="<?php echo $initial_tab === 'setup' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'setup' ? '0' : '-1'; ?>" data-msv-tab-target="setup"><?php esc_html_e('Setup', 'msv-magic-link-auth'); ?></button>
-                <button type="button" class="nav-tab<?php echo $initial_tab === 'email' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-email" aria-controls="msv-tab-email" aria-selected="<?php echo $initial_tab === 'email' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'email' ? '0' : '-1'; ?>" data-msv-tab-target="email"><?php esc_html_e('Email & Blocklist', 'msv-magic-link-auth'); ?></button>
-                <button type="button" class="nav-tab<?php echo $initial_tab === 'messaging' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-messaging" aria-controls="msv-tab-messaging" aria-selected="<?php echo $initial_tab === 'messaging' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'messaging' ? '0' : '-1'; ?>" data-msv-tab-target="messaging"><?php esc_html_e('Messaging', 'msv-magic-link-auth'); ?></button>
-                <button type="button" class="nav-tab<?php echo $initial_tab === 'maintenance' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-maintenance" aria-controls="msv-tab-maintenance" aria-selected="<?php echo $initial_tab === 'maintenance' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'maintenance' ? '0' : '-1'; ?>" data-msv-tab-target="maintenance"><?php esc_html_e('Maintenance', 'msv-magic-link-auth'); ?></button>
-                <button type="button" class="nav-tab<?php echo $initial_tab === 'log' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-log" aria-controls="msv-tab-log" aria-selected="<?php echo $initial_tab === 'log' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'log' ? '0' : '-1'; ?>" data-msv-tab-target="log"><?php esc_html_e('Log', 'msv-magic-link-auth'); ?></button>
-            </h2>
+                <?php $has_notices = $notice !== '' || $error_notice !== '' || !empty($settings['dev_mode']); ?>
+                <?php if ($has_notices): ?>
+                <div class="msv-sticky-header__row msv-sticky-header__row--notices">
+                    <?php if ($notice): ?>
+                        <div class="notice notice-success is-dismissible"><p><?php echo esc_html($notice); ?></p></div>
+                    <?php endif; ?>
+                    <?php if ($error_notice): ?>
+                        <div class="notice notice-error is-dismissible"><p><?php echo esc_html($error_notice); ?></p></div>
+                    <?php endif; ?>
+                    <?php if (!empty($settings['dev_mode'])): ?>
+                        <div class="notice notice-warning">
+                            <p>
+                                <?php
+                                printf(
+                                    /* translators: 1: "Development mode is ON —" (bold), 2: number of minutes */
+                                    esc_html__('%1$s Magic links expire after %2$d minute(s) regardless of the setting below. Turn this off before going live.', 'msv-magic-link-auth'),
+                                    '<strong>' . esc_html__('Development mode is ON —', 'msv-magic-link-auth') . '</strong>',
+                                    (int) max(1, absint($settings['dev_mode_minutes']))
+                                );
+                                ?>
+                            </p>
+                        </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
+                <div class="msv-sticky-header__row msv-sticky-header__row--nav">
+                    <h2 class="nav-tab-wrapper" role="tablist" aria-label="<?php esc_attr_e('Settings sections', 'msv-magic-link-auth'); ?>">
+                        <button type="button" class="nav-tab<?php echo $initial_tab === 'setup' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-setup" aria-controls="msv-tab-setup" aria-selected="<?php echo $initial_tab === 'setup' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'setup' ? '0' : '-1'; ?>" data-msv-tab-target="setup"><?php esc_html_e('Setup', 'msv-magic-link-auth'); ?></button>
+                        <button type="button" class="nav-tab<?php echo $initial_tab === 'email' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-email" aria-controls="msv-tab-email" aria-selected="<?php echo $initial_tab === 'email' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'email' ? '0' : '-1'; ?>" data-msv-tab-target="email"><?php esc_html_e('Email & Blocklist', 'msv-magic-link-auth'); ?></button>
+                        <button type="button" class="nav-tab<?php echo $initial_tab === 'messaging' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-messaging" aria-controls="msv-tab-messaging" aria-selected="<?php echo $initial_tab === 'messaging' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'messaging' ? '0' : '-1'; ?>" data-msv-tab-target="messaging"><?php esc_html_e('Messaging', 'msv-magic-link-auth'); ?></button>
+                        <button type="button" class="nav-tab<?php echo $initial_tab === 'maintenance' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-maintenance" aria-controls="msv-tab-maintenance" aria-selected="<?php echo $initial_tab === 'maintenance' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'maintenance' ? '0' : '-1'; ?>" data-msv-tab-target="maintenance"><?php esc_html_e('Maintenance', 'msv-magic-link-auth'); ?></button>
+                        <button type="button" class="nav-tab<?php echo $initial_tab === 'log' ? ' nav-tab-active' : ''; ?>" role="tab" id="msv-tab-btn-log" aria-controls="msv-tab-log" aria-selected="<?php echo $initial_tab === 'log' ? 'true' : 'false'; ?>" tabindex="<?php echo $initial_tab === 'log' ? '0' : '-1'; ?>" data-msv-tab-target="log"><?php esc_html_e('Log', 'msv-magic-link-auth'); ?></button>
+                    </h2>
+                    <div class="msv-sticky-header__actions">
+                        <?php submit_button(__('Save settings', 'msv-magic-link-auth'), 'primary', 'submit', false, ['form' => 'msv-settings-form']); ?>
+                        <?php if ($update['available']): ?>
+                            <a href="<?php echo esc_url($update['url']); ?>" class="button"><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></a>
+                        <?php else: ?>
+                            <button type="button" class="button" disabled><?php esc_html_e('Update plugin', 'msv-magic-link-auth'); ?></button>
+                        <?php endif; ?>
+                        <?php echo $this->render_tooltip_icon($update['message']); ?>
+                    </div>
+                </div>
+            </div>
 
             <form method="post" id="msv-settings-form">
                 <?php wp_nonce_field(self::SETTINGS_NONCE_ACTION, 'msv_magic_settings_nonce'); ?>
                 <input type="hidden" name="msv_active_tab" id="msv_active_tab" value="<?php echo esc_attr($initial_tab); ?>">
 
                 <div class="msv-tab-panel" data-msv-tab="setup" id="msv-tab-setup" role="tabpanel" aria-labelledby="msv-tab-btn-setup" tabindex="0" <?php echo $initial_tab !== 'setup' ? 'hidden' : ''; ?>>
+                    <div class="msv-tab-layout msv-tab-layout--capped">
+                        <div class="msv-tab-layout__main">
+                            <div class="msv-card">
                     <h2><?php esc_html_e('Paths and limitations', 'msv-magic-link-auth'); ?></h2>
                     <table class="form-table" role="presentation">
                         <tr>
-                            <th scope="row"><label for="request_page_id"><?php esc_html_e('Request page', 'msv-magic-link-auth'); ?></label></th>
+                            <th scope="row"><label for="request_page_id"><?php esc_html_e('Request page', 'msv-magic-link-auth'); ?></label> <?php echo $this->render_tooltip_icon(__('The page where visitors request a magic link.', 'msv-magic-link-auth')); ?></th>
                             <td>
                                 <?php echo $this->render_page_dropdown('request_page_id', $request_state['mode'], $request_state['page_id'], false); ?>
                                 <input type="text" id="request_page_custom" name="request_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($request_state['custom']); ?>" <?php echo $request_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
-                                <p class="description"><?php esc_html_e('The page where visitors request a magic link.', 'msv-magic-link-auth'); ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <th scope="row"><label for="confirm_page_id"><?php esc_html_e('Confirmation page', 'msv-magic-link-auth'); ?></label></th>
+                            <th scope="row"><label for="confirm_page_id"><?php esc_html_e('Confirmation page', 'msv-magic-link-auth'); ?></label> <?php echo $this->render_tooltip_icon(__('Where the emailed magic link itself points to.', 'msv-magic-link-auth')); ?></th>
                             <td>
                                 <?php echo $this->render_page_dropdown('confirm_page_id', $confirm_state['mode'], $confirm_state['page_id'], true); ?>
                                 <input type="text" id="confirm_page_custom" name="confirm_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($confirm_state['custom']); ?>" <?php echo $confirm_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
-                                <p class="description"><?php esc_html_e('Where the emailed magic link itself points to.', 'msv-magic-link-auth'); ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <th scope="row"><label for="vote_page_id"><?php esc_html_e('Protected page', 'msv-magic-link-auth'); ?></label></th>
+                            <th scope="row"><label for="vote_page_id"><?php esc_html_e('Protected page', 'msv-magic-link-auth'); ?></label> <?php echo $this->render_tooltip_icon(__('The page that requires a valid magic-link session to access.', 'msv-magic-link-auth')); ?></th>
                             <td>
                                 <?php echo $this->render_page_dropdown('vote_page_id', $vote_state['mode'], $vote_state['page_id'], false); ?>
                                 <input type="text" id="vote_page_custom" name="vote_page_custom" class="regular-text" placeholder="/example-path" value="<?php echo esc_attr($vote_state['custom']); ?>" <?php echo $vote_state['mode'] !== 'custom' ? 'style="display:none;"' : ''; ?>>
-                                <p class="description"><?php esc_html_e('The page that requires a valid magic-link session to access.', 'msv-magic-link-auth'); ?></p>
                             </td>
                         </tr>
                         <tr>
@@ -2129,9 +2170,15 @@ final class MSV_Magic_Link_Auth {
                             <td><input type="password" autocomplete="off" id="secret_key" name="secret_key" class="regular-text" <?php disabled(empty($settings['turnstile_enabled'])); ?> value="<?php echo esc_attr($settings['secret_key']); ?>"></td>
                         </tr>
                     </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="msv-tab-panel" data-msv-tab="email" id="msv-tab-email" role="tabpanel" aria-labelledby="msv-tab-btn-email" tabindex="0" <?php echo $initial_tab !== 'email' ? 'hidden' : ''; ?>>
+                    <div class="msv-tab-layout msv-tab-layout--capped">
+                        <div class="msv-tab-layout__main">
+                            <div class="msv-card">
                     <h2><?php esc_html_e('Email setup', 'msv-magic-link-auth'); ?></h2>
                     <table class="form-table" role="presentation">
                         <tr>
@@ -2169,23 +2216,27 @@ final class MSV_Magic_Link_Auth {
                     </p>
                     <table class="form-table" role="presentation">
                         <tr>
-                            <th scope="row"><label for="custom_disposable_domains"><?php esc_html_e('Additional domains to block', 'msv-magic-link-auth'); ?></label></th>
+                            <th scope="row"><label for="custom_disposable_domains"><?php esc_html_e('Additional domains to block', 'msv-magic-link-auth'); ?></label> <?php echo $this->render_tooltip_icon(__('Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren\'t on the public list yet.', 'msv-magic-link-auth')); ?></th>
                             <td>
                                 <textarea id="custom_disposable_domains" name="custom_disposable_domains" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['custom_disposable_domains']); ?></textarea>
-                                <p class="description"><?php esc_html_e('Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren\'t on the public list yet.', 'msv-magic-link-auth'); ?></p>
                             </td>
                         </tr>
                         <tr>
-                            <th scope="row"><label for="disposable_allowlist"><?php esc_html_e('Never block these domains', 'msv-magic-link-auth'); ?></label></th>
+                            <th scope="row"><label for="disposable_allowlist"><?php esc_html_e('Never block these domains', 'msv-magic-link-auth'); ?></label> <?php echo $this->render_tooltip_icon(__('Use this if a legitimate domain ever gets wrongly blocked.', 'msv-magic-link-auth')); ?></th>
                             <td>
                                 <textarea id="disposable_allowlist" name="disposable_allowlist" rows="4" class="large-text" placeholder="one-domain-per-line.com"><?php echo esc_textarea($settings['disposable_allowlist']); ?></textarea>
-                                <p class="description"><?php esc_html_e('Use this if a legitimate domain ever gets wrongly blocked.', 'msv-magic-link-auth'); ?></p>
                             </td>
                         </tr>
                     </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="msv-tab-panel" data-msv-tab="messaging" id="msv-tab-messaging" role="tabpanel" aria-labelledby="msv-tab-btn-messaging" tabindex="0" <?php echo $initial_tab !== 'messaging' ? 'hidden' : ''; ?>>
+                    <div class="msv-tab-layout msv-tab-layout--capped">
+                        <div class="msv-tab-layout__main">
+                            <div class="msv-card">
                     <h2><?php esc_html_e('Messages', 'msv-magic-link-auth'); ?></h2>
                     <p class="description"><?php esc_html_e('Shown to visitors as a dismissible message in the bottom-right corner of the request page.', 'msv-magic-link-auth'); ?></p>
                     <table class="form-table" role="presentation">
@@ -2218,48 +2269,36 @@ final class MSV_Magic_Link_Auth {
                             <td><textarea id="msg_disposable" name="msg_disposable" rows="2" class="large-text"><?php echo esc_textarea($settings['msg_disposable']); ?></textarea></td>
                         </tr>
                     </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="msv-tab-panel" data-msv-tab="maintenance" id="msv-tab-maintenance" role="tabpanel" aria-labelledby="msv-tab-btn-maintenance" tabindex="0" <?php echo $initial_tab !== 'maintenance' ? 'hidden' : ''; ?>>
+                    <?php
+                    $cron_disabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+                    $totalpoll_table = $this->get_totalpoll_log_table($settings['totalpoll_table_suffix'], $settings['totalpoll_ip_column']);
+                    $voter_role_count = $this->count_voters('role');
+                    $voter_tag_count = $this->count_voters('tag');
+                    $voter_confirm_role = sprintf(
+                        /* translators: %d: number of matching accounts */
+                        __('This will permanently delete %d account(s) matching "every Subscriber-only account". This cannot be undone. Continue?', 'msv-magic-link-auth'),
+                        $voter_role_count
+                    );
+                    $voter_confirm_tag = sprintf(
+                        /* translators: %d: number of matching accounts */
+                        __('This will permanently delete %d account(s) matching "accounts created by this plugin". This cannot be undone. Continue?', 'msv-magic-link-auth'),
+                        $voter_tag_count
+                    );
+                    ?>
+                    <div class="msv-tab-layout">
+                        <div class="msv-tab-layout__main">
+                            <div class="msv-card">
                     <h2><?php esc_html_e('TotalPoll voter IP cleanup', 'msv-magic-link-auth'); ?></h2>
                     <p class="description">
                         <?php esc_html_e('TotalPoll Pro logs each voter\'s IP address alongside every vote. This clears just the IP address from that log after voting closes. Vote counts and results are stored in a completely separate table with no personal data and are never affected.', 'msv-magic-link-auth'); ?>
                     </p>
-                    <?php
-                    $totalpoll_table = $this->get_totalpoll_log_table($settings['totalpoll_table_suffix'], $settings['totalpoll_ip_column']);
-                    ?>
                     <p>
-                        <?php if ($totalpoll_table !== null): ?>
-                            <?php
-                            printf(
-                                /* translators: 1: database table name, 2: number of rows currently storing an IP address */
-                                esc_html__('Detected table %1$s — %2$d entries currently store an IP address.', 'msv-magic-link-auth'),
-                                '<code>' . esc_html($totalpoll_table) . '</code>',
-                                (int) $this->count_totalpoll_ips($totalpoll_table, $settings['totalpoll_ip_column'])
-                            );
-                            ?>
-                        <?php else: ?>
-                            <?php esc_html_e('No matching table/column found - TotalPoll Pro may not be installed, or uses a different table/column name. The button below is disabled until a match is found.', 'msv-magic-link-auth'); ?>
-                        <?php endif; ?>
-                    </p>
-                    <table class="form-table" role="presentation">
-                        <tr>
-                            <th scope="row"><label for="totalpoll_table_suffix"><?php esc_html_e('TotalPoll log table (without your site\'s table prefix)', 'msv-magic-link-auth'); ?></label></th>
-                            <td><input type="text" id="totalpoll_table_suffix" name="totalpoll_table_suffix" class="regular-text" value="<?php echo esc_attr($settings['totalpoll_table_suffix']); ?>"></td>
-                        </tr>
-                        <tr>
-                            <th scope="row"><label for="totalpoll_ip_column"><?php esc_html_e('IP column name', 'msv-magic-link-auth'); ?></label></th>
-                            <td><input type="text" id="totalpoll_ip_column" name="totalpoll_ip_column" class="regular-text" value="<?php echo esc_attr($settings['totalpoll_ip_column']); ?>"></td>
-                        </tr>
-                    </table>
-                    <p>
-                        <button
-                            type="submit"
-                            name="msv_magic_check_totalpoll"
-                            value="1"
-                            form="msv-settings-form"
-                            class="button"
-                        ><?php esc_html_e('Run checks now', 'msv-magic-link-auth'); ?></button>
                         <button
                             type="submit"
                             name="msv_magic_clear_totalpoll_ips"
@@ -2271,22 +2310,23 @@ final class MSV_Magic_Link_Auth {
                         ><?php esc_html_e('Clear TotalPoll voter IPs now', 'msv-magic-link-auth'); ?></button>
                     </p>
 
-                    <h3><?php esc_html_e('Automatic purge schedule', 'msv-magic-link-auth'); ?></h3>
-                    <?php
-                    echo $this->render_schedule_fieldset(
-                        'totalpoll',
-                        $this->get_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY),
-                        'msv_magic_save_totalpoll_schedule',
-                        __('When to purge automatically', 'msv-magic-link-auth')
-                    );
-                    ?>
+                    <h3><?php esc_html_e('Purge IP addresses', 'msv-magic-link-auth'); ?></h3>
+                    <?php if (!$cron_disabled): ?>
+                        <?php
+                        echo $this->render_schedule_fieldset(
+                            'totalpoll',
+                            $this->get_schedule(self::TOTALPOLL_SCHEDULE_OPTION_KEY),
+                            'msv_magic_save_totalpoll_schedule',
+                            __('When to purge automatically', 'msv-magic-link-auth')
+                        );
+                        ?>
+                    <?php endif; ?>
 
                     <hr>
-                    <h2><?php esc_html_e('Delete all voters', 'msv-magic-link-auth'); ?></h2>
+                    <h2><?php esc_html_e('Remove voter accounts', 'msv-magic-link-auth'); ?></h2>
                     <p class="description">
                         <?php esc_html_e('Permanently deletes WordPress accounts. Choose which accounts count as "voters" below, then use the manual button or an automatic schedule to remove them once you no longer need their accounts (for example, after voting has fully closed).', 'msv-magic-link-auth'); ?>
                     </p>
-                    <?php $voter_role_count = $this->count_voters('role'); $voter_tag_count = $this->count_voters('tag'); ?>
                     <table class="form-table" role="presentation">
                         <tr>
                             <th scope="row"><?php esc_html_e('Which accounts to delete', 'msv-magic-link-auth'); ?></th>
@@ -2314,18 +2354,6 @@ final class MSV_Magic_Link_Auth {
                             </td>
                         </tr>
                     </table>
-                    <?php
-                    $voter_confirm_role = sprintf(
-                        /* translators: %d: number of matching accounts */
-                        __('This will permanently delete %d account(s) matching "every Subscriber-only account". This cannot be undone. Continue?', 'msv-magic-link-auth'),
-                        $voter_role_count
-                    );
-                    $voter_confirm_tag = sprintf(
-                        /* translators: %d: number of matching accounts */
-                        __('This will permanently delete %d account(s) matching "accounts created by this plugin". This cannot be undone. Continue?', 'msv-magic-link-auth'),
-                        $voter_tag_count
-                    );
-                    ?>
                     <p>
                         <button
                             type="submit"
@@ -2337,21 +2365,72 @@ final class MSV_Magic_Link_Auth {
                             data-confirm-role="<?php echo esc_attr($voter_confirm_role); ?>"
                             data-confirm-tag="<?php echo esc_attr($voter_confirm_tag); ?>"
                             <?php echo ($settings['voter_delete_match_mode'] === 'tag' ? $voter_tag_count : $voter_role_count) === 0 ? 'disabled' : ''; ?>
-                        ><?php esc_html_e('Delete all voters now', 'msv-magic-link-auth'); ?></button>
+                        ><?php esc_html_e('Remove voter accounts now', 'msv-magic-link-auth'); ?></button>
                     </p>
 
                     <h3><?php esc_html_e('Automatic deletion schedule', 'msv-magic-link-auth'); ?></h3>
-                    <?php
-                    echo $this->render_schedule_fieldset(
-                        'voter_delete',
-                        $this->get_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY),
-                        'msv_magic_save_voter_delete_schedule',
-                        __('When to delete automatically', 'msv-magic-link-auth')
-                    );
-                    ?>
+                    <?php if (!$cron_disabled): ?>
+                        <?php
+                        echo $this->render_schedule_fieldset(
+                            'voter_delete',
+                            $this->get_schedule(self::VOTER_DELETE_SCHEDULE_OPTION_KEY),
+                            'msv_magic_save_voter_delete_schedule',
+                            __('When to delete automatically', 'msv-magic-link-auth')
+                        );
+                        ?>
+                    <?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="msv-tab-layout__sidebar">
+                            <div class="msv-card">
+                    <p>
+                        <?php if ($totalpoll_table !== null): ?>
+                            <?php
+                            printf(
+                                /* translators: 1: database table name, 2: number of rows currently storing an IP address */
+                                esc_html__('Detected table %1$s — %2$d entries currently store an IP address.', 'msv-magic-link-auth'),
+                                '<code>' . esc_html($totalpoll_table) . '</code>',
+                                (int) $this->count_totalpoll_ips($totalpoll_table, $settings['totalpoll_ip_column'])
+                            );
+                            ?>
+                        <?php else: ?>
+                            <?php esc_html_e('No matching table/column found - TotalPoll Pro may not be installed, or uses a different table/column name. The button below is disabled until a match is found.', 'msv-magic-link-auth'); ?>
+                        <?php endif; ?>
+                    </p>
+                    <div class="msv-field-stack">
+                        <label for="totalpoll_table_suffix"><?php esc_html_e('TotalPoll log table', 'msv-magic-link-auth'); ?> <?php echo $this->render_tooltip_icon(__('Enter it without your site\'s table prefix.', 'msv-magic-link-auth'), true); ?></label>
+                        <input type="text" id="totalpoll_table_suffix" name="totalpoll_table_suffix" value="<?php echo esc_attr($settings['totalpoll_table_suffix']); ?>">
+                    </div>
+                    <div class="msv-field-stack">
+                        <label for="totalpoll_ip_column"><?php esc_html_e('IP column name', 'msv-magic-link-auth'); ?></label>
+                        <input type="text" id="totalpoll_ip_column" name="totalpoll_ip_column" value="<?php echo esc_attr($settings['totalpoll_ip_column']); ?>">
+                    </div>
+                    <p>
+                        <button
+                            type="submit"
+                            name="msv_magic_check_totalpoll"
+                            value="1"
+                            form="msv-settings-form"
+                            class="button"
+                        ><?php esc_html_e('Run checks now', 'msv-magic-link-auth'); ?></button>
+                    </p>
+                    <?php if ($cron_disabled): ?>
+                        <div class="notice notice-warning inline">
+                            <p>
+                                <?php esc_html_e('WP-Cron is disabled on this site (DISABLE_WP_CRON in wp-config.php), so automatic schedules cannot run. The manual buttons on this tab still work normally.', 'msv-magic-link-auth'); ?>
+                                <a href="https://developer.wordpress.org/plugins/cron/" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Learn how to enable WP-Cron', 'msv-magic-link-auth'); ?></a>
+                            </p>
+                        </div>
+                    <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log" role="tabpanel" aria-labelledby="msv-tab-btn-log" tabindex="0" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
+                    <div class="msv-tab-layout">
+                        <div class="msv-tab-layout__main">
+                            <div class="msv-card">
                     <h2><?php esc_html_e('Log retention', 'msv-magic-link-auth'); ?></h2>
                     <table class="form-table" role="presentation">
                         <tr>
@@ -2359,11 +2438,16 @@ final class MSV_Magic_Link_Auth {
                             <td><input type="number" min="1" id="log_retention_days" name="log_retention_days" value="<?php echo esc_attr((string) max(1, absint($settings['log_retention_days']))); ?>"></td>
                         </tr>
                     </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </form>
 
             <div class="msv-tab-panel" data-msv-tab="log" id="msv-tab-log-recent" <?php echo $initial_tab !== 'log' ? 'hidden' : ''; ?>>
-                <hr>
+                <div class="msv-tab-layout">
+                    <div class="msv-tab-layout__main">
+                        <div class="msv-card">
                 <h2><?php esc_html_e('Recent log', 'msv-magic-link-auth'); ?></h2>
                 <?php if (empty($log)): ?>
                     <p><?php esc_html_e('No log entries yet.', 'msv-magic-link-auth'); ?></p>
@@ -2392,6 +2476,9 @@ final class MSV_Magic_Link_Auth {
                         <?php submit_button(__('Clear log', 'msv-magic-link-auth'), 'delete', 'submit', false); ?>
                     </form>
                 <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <style>
@@ -2399,14 +2486,84 @@ final class MSV_Magic_Link_Auth {
                     position: sticky;
                     top: 0;
                     z-index: 30;
-                    background: #f0f0f1;
-                    padding-top: 10px;
+                    background: #fff;
+                    padding: 16px 20px 0;
                     border-bottom: 1px solid #dcdcde;
                 }
                 .msv-has-adminbar .msv-sticky-header { top: 32px; }
                 @media screen and (max-width: 782px) {
                     .msv-has-adminbar .msv-sticky-header { top: 46px; }
                 }
+                .msv-sticky-header__row--title p { margin: 4px 0 0; color: #646970; }
+                .msv-sticky-header__row--notices .notice { margin: 8px 0; }
+                .msv-sticky-header__row--nav {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    flex-wrap: wrap;
+                    gap: 8px 16px;
+                    margin-top: 8px;
+                }
+                .msv-sticky-header__row--nav .nav-tab-wrapper { margin: 0; border-bottom: none; }
+                .msv-sticky-header__actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+                .msv-card {
+                    background: #fff;
+                    border: 1px solid #dcdcde;
+                    border-radius: 8px;
+                    padding: 24px;
+                    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+                    box-sizing: border-box;
+                }
+                .msv-card > *:first-child { margin-top: 0; }
+                .msv-card > *:last-child { margin-bottom: 0; }
+                .msv-card hr { border: none; border-top: 1px solid #dcdcde; margin: 24px 0; }
+
+                .msv-tab-layout { display: flex; align-items: flex-start; gap: 24px; margin-top: 20px; }
+                .msv-tab-layout--capped { max-width: 960px; }
+                .msv-tab-layout__main { flex: 2 1 0%; min-width: 0; }
+                .msv-tab-layout__sidebar { flex: 1 1 0%; min-width: 280px; }
+                @media screen and (max-width: 782px) {
+                    .msv-tab-layout { flex-direction: column; }
+                    .msv-tab-layout__sidebar { min-width: 0; width: 100%; }
+                }
+
+                .msv-field-stack { margin-bottom: 16px; }
+                .msv-field-stack label { display: block; font-weight: 600; margin-bottom: 4px; }
+                .msv-field-stack input[type="text"] { width: 100%; max-width: 100%; }
+
+                .msv-tooltip { position: relative; display: inline-block; margin-left: 4px; vertical-align: middle; }
+                .msv-tooltip__trigger {
+                    background: none;
+                    border: none;
+                    padding: 0;
+                    margin: 0;
+                    cursor: pointer;
+                    display: inline-flex;
+                    align-items: center;
+                    line-height: 1;
+                    color: #787c82;
+                }
+                .msv-tooltip__trigger:hover,
+                .msv-tooltip__trigger:focus-visible { color: #2271b1; }
+                .msv-tooltip__trigger .dashicons { width: 16px; height: 16px; font-size: 16px; }
+                .msv-tooltip__bubble {
+                    position: absolute;
+                    top: 100%;
+                    left: 0;
+                    margin-top: 6px;
+                    width: max-content;
+                    max-width: 260px;
+                    background: #1d2327;
+                    color: #fff;
+                    font-size: 12px;
+                    line-height: 1.5;
+                    padding: 8px 10px;
+                    border-radius: 4px;
+                    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+                    z-index: 25;
+                }
+                .msv-tooltip--align-right .msv-tooltip__bubble { left: auto; right: 0; }
             </style>
             <script>
             (function () {
@@ -2458,6 +2615,17 @@ final class MSV_Magic_Link_Auth {
                     fieldset.querySelectorAll('.msv-schedule-group').forEach(function (group) {
                         group.hidden = group.getAttribute('data-schedule-group') !== mode;
                     });
+                    var tzNote = fieldset.querySelector('.msv-schedule-timezone-note');
+                    if (tzNote) { tzNote.hidden = mode === 'off'; }
+                }
+
+                function closeAllTooltips(except) {
+                    document.querySelectorAll('.msv-tooltip__trigger[aria-expanded="true"]').forEach(function (btn) {
+                        if (btn === except) { return; }
+                        btn.setAttribute('aria-expanded', 'false');
+                        var bubble = document.getElementById(btn.getAttribute('aria-controls'));
+                        if (bubble) { bubble.hidden = true; }
+                    });
                 }
 
                 function syncDeleteVotersButton() {
@@ -2489,6 +2657,20 @@ final class MSV_Magic_Link_Auth {
                         });
                         syncScheduleFieldset(fieldset);
                     });
+
+                    document.querySelectorAll('.msv-tooltip__trigger').forEach(function (btn) {
+                        btn.addEventListener('click', function (e) {
+                            e.stopPropagation();
+                            var bubble = document.getElementById(btn.getAttribute('aria-controls'));
+                            if (!bubble) { return; }
+                            var wasOpen = btn.getAttribute('aria-expanded') === 'true';
+                            closeAllTooltips(btn);
+                            btn.setAttribute('aria-expanded', wasOpen ? 'false' : 'true');
+                            bubble.hidden = wasOpen;
+                        });
+                    });
+                    document.addEventListener('click', function () { closeAllTooltips(); });
+                    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeAllTooltips(); } });
 
                     document.querySelectorAll('input[name="voter_delete_match_mode"]').forEach(function (radio) {
                         radio.addEventListener('change', syncDeleteVotersButton);

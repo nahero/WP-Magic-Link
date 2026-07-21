@@ -3,7 +3,7 @@ Contributors: igor@igibits.com
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.4
-Stable tag: 0.9.0
+Stable tag: 0.9.1
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -57,6 +57,11 @@ Yes, on the Messaging tab. Every message shown to a visitor is editable, and if 
 In the WordPress options table, under option names prefixed `msv_magic_link_auth_`. Deleting the plugin (not just deactivating it) removes all of it, including any stored magic-link tokens and rate-limit counters.
 
 == Changelog ==
+
+= 0.9.1 =
+* Redesigned the settings screen: white rounded cards, a two-row sticky header (title above, tabs and Save/Update aligned on one row), and help-icon tooltips in place of many inline descriptions.
+* Maintenance tab now splits into a main area and a right-hand sidebar: TotalPoll table detection, the table/column inputs, and "Run checks now" moved to the sidebar; renamed "Automatic purge schedule" to "Purge IP addresses" and "Delete all voters" to "Remove voter accounts".
+* When WP-Cron is disabled on the site, both schedule sections are hidden (manual buttons still work) and a sidebar notice explains why, with a link to enable it.
 
 = 0.9.0 =
 * New Maintenance tab, moved out of Log: the TotalPoll voter IP cleanup section now lives here, alongside a new "Run checks now" button that reports table/column readiness as a page notice.

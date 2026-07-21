@@ -9,7 +9,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-07-21T10:25:05+00:00\n"
+"POT-Creation-Date: 2026-07-21T12:25:31+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: msv-magic-link-auth\n"
@@ -19,7 +19,7 @@ msgstr ""
 #: msv-magic-link-auth.php:1323
 #: msv-magic-link-auth.php:1388
 #: msv-magic-link-auth.php:1389
-#: msv-magic-link-auth.php:2016
+#: msv-magic-link-auth.php:2048
 msgid "WP Magic Link Auth"
 msgstr ""
 
@@ -76,7 +76,7 @@ msgstr ""
 
 #: msv-magic-link-auth.php:376
 #: msv-magic-link-auth.php:600
-#: msv-magic-link-auth.php:1860
+#: msv-magic-link-auth.php:1891
 msgid "Invalid request."
 msgstr ""
 
@@ -125,457 +125,461 @@ msgstr ""
 msgid "— Use request page path (default) —"
 msgstr ""
 
+#: msv-magic-link-auth.php:1522
+msgid "More information"
+msgstr ""
+
 #. translators: %s: site timezone name, e.g. Europe/Zurich
-#: msv-magic-link-auth.php:1515
+#: msv-magic-link-auth.php:1543
 #, php-format
 msgid "Times below are in your site's timezone (%s)."
 msgstr ""
 
-#: msv-magic-link-auth.php:1522
+#: msv-magic-link-auth.php:1550
 msgid "Manual only (no automatic schedule)"
 msgstr ""
 
-#: msv-magic-link-auth.php:1526
+#: msv-magic-link-auth.php:1554
 msgid "Run once at a specific date and time"
 msgstr ""
 
-#: msv-magic-link-auth.php:1533
+#: msv-magic-link-auth.php:1561
 msgid "Repeat automatically"
 msgstr ""
 
 #. translators: 1: number-of-days input, 2: start date/time input, 3: end date/time input
-#: msv-magic-link-auth.php:1539
+#: msv-magic-link-auth.php:1567
 #, php-format
 msgid "Every %1$s days, from %2$s to %3$s"
 msgstr ""
 
-#. translators: %s: formatted next-run date/time, or "Not scheduled"
-#: msv-magic-link-auth.php:1551
+#. translators: %s: formatted next-run date/time
+#: msv-magic-link-auth.php:1585
 #, php-format
 msgid "Next scheduled run: %s"
 msgstr ""
 
-#: msv-magic-link-auth.php:1552
-msgid "Not scheduled"
-msgstr ""
-
 #. translators: 1: formatted last-run date/time, 2: status word (success/error/skipped), 3: short diagnostic message
-#: msv-magic-link-auth.php:1560
+#: msv-magic-link-auth.php:1595
 #, php-format
 msgid "Last run: %1$s — %2$s (%3$s)"
 msgstr ""
 
-#: msv-magic-link-auth.php:1567
-msgid "Last run: never."
-msgstr ""
-
-#: msv-magic-link-auth.php:1571
-msgid "WP-Cron is disabled on this site (DISABLE_WP_CRON), so this schedule will not run unless a real system cron job is configured to trigger it."
-msgstr ""
-
-#: msv-magic-link-auth.php:1574
+#: msv-magic-link-auth.php:1605
 msgid "Save schedule"
 msgstr ""
 
-#: msv-magic-link-auth.php:1830
+#: msv-magic-link-auth.php:1861
 msgid "Could not save the schedule: please choose a valid date and time."
 msgstr ""
 
-#: msv-magic-link-auth.php:1833
+#: msv-magic-link-auth.php:1864
 msgid "Could not save the schedule: please choose valid start and end dates."
 msgstr ""
 
-#: msv-magic-link-auth.php:1865
+#: msv-magic-link-auth.php:1896
 msgid "Log cleared."
 msgstr ""
 
 #. translators: %s: error message
-#: msv-magic-link-auth.php:1870
+#: msv-magic-link-auth.php:1901
 #, php-format
 msgid "Could not refresh the list: %s The current list was left unchanged."
 msgstr ""
 
 #. translators: %d: number of domains loaded
-#: msv-magic-link-auth.php:1873
+#: msv-magic-link-auth.php:1904
 #, php-format
 msgid "Disposable-domain list refreshed: %d domains."
 msgstr ""
 
-#: msv-magic-link-auth.php:1881
+#: msv-magic-link-auth.php:1912
 msgid "Could not find that table/column - nothing was changed. Check the table name and column name below."
 msgstr ""
 
 #. translators: %s: error message
-#: msv-magic-link-auth.php:1886
+#: msv-magic-link-auth.php:1917
 #, php-format
 msgid "Could not clear IPs: %s"
 msgstr ""
 
 #. translators: %d: number of rows affected
-#: msv-magic-link-auth.php:1889
+#: msv-magic-link-auth.php:1920
 #, php-format
 msgid "Cleared the IP address from %d TotalPoll log entries."
 msgstr ""
 
-#: msv-magic-link-auth.php:1903
+#: msv-magic-link-auth.php:1934
 msgid "Checks failed: could not find that table/column. Check the table name and column name below."
 msgstr ""
 
 #. translators: 1: database table name, 2: number of rows currently storing an IP address
-#: msv-magic-link-auth.php:1907
+#: msv-magic-link-auth.php:1938
 #, php-format
 msgid "Checks passed: table %1$s found, %2$d entries currently store an IP address."
 msgstr ""
 
-#: msv-magic-link-auth.php:1915
+#: msv-magic-link-auth.php:1946
 msgid "IP-purge schedule saved."
 msgstr ""
 
-#: msv-magic-link-auth.php:1920
+#: msv-magic-link-auth.php:1951
 msgid "Voter-deletion schedule saved."
 msgstr ""
 
 #. translators: %d: number of accounts deleted
-#: msv-magic-link-auth.php:1929
+#: msv-magic-link-auth.php:1960
 #, php-format
 msgid "Deleted %d voter account(s)."
 msgstr ""
 
-#: msv-magic-link-auth.php:1989
+#: msv-magic-link-auth.php:2020
 msgid "Settings saved."
 msgstr ""
 
-#: msv-magic-link-auth.php:2017
+#: msv-magic-link-auth.php:2049
 msgid "Developed by igor@igibits.com"
 msgstr ""
 
 #. translators: 1: "Development mode is ON —" (bold), 2: number of minutes
-#: msv-magic-link-auth.php:2030
+#: msv-magic-link-auth.php:2067
 #, php-format
 msgid "%1$s Magic links expire after %2$d minute(s) regardless of the setting below. Turn this off before going live."
 msgstr ""
 
-#: msv-magic-link-auth.php:2031
+#: msv-magic-link-auth.php:2068
 msgid "Development mode is ON —"
 msgstr ""
 
-#: msv-magic-link-auth.php:2039
-msgid "Save settings"
-msgstr ""
-
-#: msv-magic-link-auth.php:2041
-#: msv-magic-link-auth.php:2043
-msgid "Update plugin"
-msgstr ""
-
-#: msv-magic-link-auth.php:2049
+#: msv-magic-link-auth.php:2079
 msgid "Settings sections"
 msgstr ""
 
-#: msv-magic-link-auth.php:2050
+#: msv-magic-link-auth.php:2080
 msgid "Setup"
 msgstr ""
 
-#: msv-magic-link-auth.php:2051
+#: msv-magic-link-auth.php:2081
 msgid "Email & Blocklist"
 msgstr ""
 
-#: msv-magic-link-auth.php:2052
+#: msv-magic-link-auth.php:2082
 msgid "Messaging"
 msgstr ""
 
-#: msv-magic-link-auth.php:2053
+#: msv-magic-link-auth.php:2083
 msgid "Maintenance"
 msgstr ""
 
-#: msv-magic-link-auth.php:2054
+#: msv-magic-link-auth.php:2084
 msgid "Log"
 msgstr ""
 
-#: msv-magic-link-auth.php:2062
-msgid "Paths and limitations"
-msgstr ""
-
-#: msv-magic-link-auth.php:2065
-msgid "Request page"
-msgstr ""
-
-#: msv-magic-link-auth.php:2069
-msgid "The page where visitors request a magic link."
-msgstr ""
-
-#: msv-magic-link-auth.php:2073
-msgid "Confirmation page"
-msgstr ""
-
-#: msv-magic-link-auth.php:2077
-msgid "Where the emailed magic link itself points to."
-msgstr ""
-
-#: msv-magic-link-auth.php:2081
-msgid "Protected page"
-msgstr ""
-
-#: msv-magic-link-auth.php:2085
-msgid "The page that requires a valid magic-link session to access."
+#: msv-magic-link-auth.php:2087
+msgid "Save settings"
 msgstr ""
 
 #: msv-magic-link-auth.php:2089
-msgid "Max attempts per hour (per IP)"
-msgstr ""
-
-#: msv-magic-link-auth.php:2093
-msgid "Magic link expiry (hours)"
-msgstr ""
-
-#: msv-magic-link-auth.php:2097
-msgid "Development mode"
-msgstr ""
-
-#: msv-magic-link-auth.php:2101
-msgid "Force magic link expiry to a fixed number of minutes, ignoring the hours setting above (for testing only)"
+#: msv-magic-link-auth.php:2091
+msgid "Update plugin"
 msgstr ""
 
 #: msv-magic-link-auth.php:2106
-msgid "Development mode expiry (minutes)"
+msgid "Paths and limitations"
 msgstr ""
 
-#: msv-magic-link-auth.php:2112
-msgid "Cloudflare Turnstile"
+#: msv-magic-link-auth.php:2109
+msgid "Request page"
 msgstr ""
 
-#: msv-magic-link-auth.php:2115
-msgid "Enable Turnstile"
+#: msv-magic-link-auth.php:2109
+msgid "The page where visitors request a magic link."
 msgstr ""
 
-#: msv-magic-link-auth.php:2119
-msgid "Verify Cloudflare Turnstile ourselves (leave off if another plugin or service already verifies it before this runs)"
+#: msv-magic-link-auth.php:2116
+msgid "Confirmation page"
 msgstr ""
 
-#: msv-magic-link-auth.php:2124
-msgid "Turnstile site key"
+#: msv-magic-link-auth.php:2116
+msgid "Where the emailed magic link itself points to."
 msgstr ""
 
-#: msv-magic-link-auth.php:2128
-msgid "Turnstile secret key"
+#: msv-magic-link-auth.php:2123
+msgid "Protected page"
 msgstr ""
 
-#: msv-magic-link-auth.php:2135
-msgid "Email setup"
+#: msv-magic-link-auth.php:2123
+msgid "The page that requires a valid magic-link session to access."
+msgstr ""
+
+#: msv-magic-link-auth.php:2130
+msgid "Max attempts per hour (per IP)"
+msgstr ""
+
+#: msv-magic-link-auth.php:2134
+msgid "Magic link expiry (hours)"
 msgstr ""
 
 #: msv-magic-link-auth.php:2138
-msgid "Email \"from\" name"
+msgid "Development mode"
 msgstr ""
 
 #: msv-magic-link-auth.php:2142
+msgid "Force magic link expiry to a fixed number of minutes, ignoring the hours setting above (for testing only)"
+msgstr ""
+
+#: msv-magic-link-auth.php:2147
+msgid "Development mode expiry (minutes)"
+msgstr ""
+
+#: msv-magic-link-auth.php:2153
+msgid "Cloudflare Turnstile"
+msgstr ""
+
+#: msv-magic-link-auth.php:2156
+msgid "Enable Turnstile"
+msgstr ""
+
+#: msv-magic-link-auth.php:2160
+msgid "Verify Cloudflare Turnstile ourselves (leave off if another plugin or service already verifies it before this runs)"
+msgstr ""
+
+#: msv-magic-link-auth.php:2165
+msgid "Turnstile site key"
+msgstr ""
+
+#: msv-magic-link-auth.php:2169
+msgid "Turnstile secret key"
+msgstr ""
+
+#: msv-magic-link-auth.php:2182
+msgid "Email setup"
+msgstr ""
+
+#: msv-magic-link-auth.php:2185
+msgid "Email \"from\" name"
+msgstr ""
+
+#: msv-magic-link-auth.php:2189
 msgid "Email subject"
 msgstr ""
 
-#: msv-magic-link-auth.php:2148
+#: msv-magic-link-auth.php:2195
 msgid "Disposable email blocklist"
 msgstr ""
 
-#: msv-magic-link-auth.php:2150
+#: msv-magic-link-auth.php:2197
 msgid "Blocks known throwaway email services (e.g. Mailinator, temp-mail) from requesting a magic link, so one person can't register multiple accounts using disposable inboxes."
 msgstr ""
 
-#: msv-magic-link-auth.php:2151
+#: msv-magic-link-auth.php:2198
 msgid "The plugin ships with a snapshot of a public blocklist. New disposable services appear constantly, so refresh this list shortly before you need it most accurate — no developer needed, just click the button below."
 msgstr ""
 
 #. translators: 1: number of domains, 2: date/time last refreshed
-#: msv-magic-link-auth.php:2158
+#: msv-magic-link-auth.php:2205
 #, php-format
 msgid "%1$s domains loaded — last refreshed %2$s."
 msgstr ""
 
-#: msv-magic-link-auth.php:2164
+#: msv-magic-link-auth.php:2211
 msgid "Using the snapshot bundled with the plugin (never refreshed since install)."
 msgstr ""
 
-#: msv-magic-link-auth.php:2168
+#: msv-magic-link-auth.php:2215
 msgid "Refresh list now"
 msgstr ""
 
-#: msv-magic-link-auth.php:2172
+#: msv-magic-link-auth.php:2219
 msgid "Additional domains to block"
 msgstr ""
 
-#: msv-magic-link-auth.php:2175
+#: msv-magic-link-auth.php:2219
 msgid "Add domains you spot in the log (e.g. a rotating temp-mail domain) that aren't on the public list yet."
 msgstr ""
 
-#: msv-magic-link-auth.php:2179
+#: msv-magic-link-auth.php:2225
 msgid "Never block these domains"
 msgstr ""
 
-#: msv-magic-link-auth.php:2182
+#: msv-magic-link-auth.php:2225
 msgid "Use this if a legitimate domain ever gets wrongly blocked."
 msgstr ""
 
-#: msv-magic-link-auth.php:2189
+#: msv-magic-link-auth.php:2240
 msgid "Messages"
 msgstr ""
 
-#: msv-magic-link-auth.php:2190
+#: msv-magic-link-auth.php:2241
 msgid "Shown to visitors as a dismissible message in the bottom-right corner of the request page."
 msgstr ""
 
-#: msv-magic-link-auth.php:2193
+#: msv-magic-link-auth.php:2244
 msgid "Link sent"
 msgstr ""
 
-#: msv-magic-link-auth.php:2197
+#: msv-magic-link-auth.php:2248
 msgid "Link invalid / expired / already used"
 msgstr ""
 
-#: msv-magic-link-auth.php:2201
+#: msv-magic-link-auth.php:2252
 msgid "Too many attempts"
 msgstr ""
 
-#: msv-magic-link-auth.php:2205
+#: msv-magic-link-auth.php:2256
 msgid "Turnstile verification failed"
 msgstr ""
 
-#: msv-magic-link-auth.php:2209
+#: msv-magic-link-auth.php:2260
 msgid "Invalid/missing email"
 msgstr ""
 
-#: msv-magic-link-auth.php:2213
+#: msv-magic-link-auth.php:2264
 msgid "Confirm-page prompt"
 msgstr ""
 
-#: msv-magic-link-auth.php:2217
+#: msv-magic-link-auth.php:2268
 msgid "Disposable email rejected"
 msgstr ""
 
-#: msv-magic-link-auth.php:2224
-msgid "TotalPoll voter IP cleanup"
-msgstr ""
-
-#: msv-magic-link-auth.php:2226
-msgid "TotalPoll Pro logs each voter's IP address alongside every vote. This clears just the IP address from that log after voting closes. Vote counts and results are stored in a completely separate table with no personal data and are never affected."
-msgstr ""
-
-#. translators: 1: database table name, 2: number of rows currently storing an IP address
-#: msv-magic-link-auth.php:2236
-#, php-format
-msgid "Detected table %1$s — %2$d entries currently store an IP address."
-msgstr ""
-
-#: msv-magic-link-auth.php:2242
-msgid "No matching table/column found - TotalPoll Pro may not be installed, or uses a different table/column name. The button below is disabled until a match is found."
-msgstr ""
-
-#: msv-magic-link-auth.php:2247
-msgid "TotalPoll log table (without your site's table prefix)"
-msgstr ""
-
-#: msv-magic-link-auth.php:2251
-msgid "IP column name"
-msgstr ""
-
-#: msv-magic-link-auth.php:2262
-msgid "Run checks now"
-msgstr ""
-
-#: msv-magic-link-auth.php:2270
-msgid "This will permanently clear all voter IP addresses from the TotalPoll log. This cannot be undone. Only do this after voting has fully closed. Continue?"
-msgstr ""
-
-#: msv-magic-link-auth.php:2271
-msgid "Clear TotalPoll voter IPs now"
-msgstr ""
-
-#: msv-magic-link-auth.php:2274
-msgid "Automatic purge schedule"
-msgstr ""
-
-#: msv-magic-link-auth.php:2280
-msgid "When to purge automatically"
-msgstr ""
-
+#. translators: %d: number of matching accounts
 #: msv-magic-link-auth.php:2285
-msgid "Delete all voters"
-msgstr ""
-
-#: msv-magic-link-auth.php:2287
-msgid "Permanently deletes WordPress accounts. Choose which accounts count as \"voters\" below, then use the manual button or an automatic schedule to remove them once you no longer need their accounts (for example, after voting has fully closed)."
-msgstr ""
-
-#: msv-magic-link-auth.php:2292
-msgid "Which accounts to delete"
-msgstr ""
-
-#. translators: %d: number of matching accounts
-#: msv-magic-link-auth.php:2299
-#, php-format
-msgid "Every account whose only role is Subscriber (%d account(s)). Never touches administrators, editors, or any other multi-role account. Includes accounts that already existed before this feature was added."
-msgstr ""
-
-#. translators: %d: number of matching accounts
-#: msv-magic-link-auth.php:2309
-#, php-format
-msgid "Only accounts this plugin itself created (%d account(s)). Safer on a site that also uses the Subscriber role for other members, but cannot include accounts created before this feature was added."
-msgstr ""
-
-#. translators: %d: number of matching accounts
-#: msv-magic-link-auth.php:2320
 #, php-format
 msgid "This will permanently delete %d account(s) matching \"every Subscriber-only account\". This cannot be undone. Continue?"
 msgstr ""
 
 #. translators: %d: number of matching accounts
-#: msv-magic-link-auth.php:2325
+#: msv-magic-link-auth.php:2290
 #, php-format
 msgid "This will permanently delete %d account(s) matching \"accounts created by this plugin\". This cannot be undone. Continue?"
 msgstr ""
 
-#: msv-magic-link-auth.php:2340
-msgid "Delete all voters now"
+#: msv-magic-link-auth.php:2297
+msgid "TotalPoll voter IP cleanup"
 msgstr ""
 
-#: msv-magic-link-auth.php:2343
+#: msv-magic-link-auth.php:2299
+msgid "TotalPoll Pro logs each voter's IP address alongside every vote. This clears just the IP address from that log after voting closes. Vote counts and results are stored in a completely separate table with no personal data and are never affected."
+msgstr ""
+
+#: msv-magic-link-auth.php:2309
+msgid "This will permanently clear all voter IP addresses from the TotalPoll log. This cannot be undone. Only do this after voting has fully closed. Continue?"
+msgstr ""
+
+#: msv-magic-link-auth.php:2310
+msgid "Clear TotalPoll voter IPs now"
+msgstr ""
+
+#: msv-magic-link-auth.php:2313
+msgid "Purge IP addresses"
+msgstr ""
+
+#: msv-magic-link-auth.php:2320
+msgid "When to purge automatically"
+msgstr ""
+
+#: msv-magic-link-auth.php:2326
+msgid "Remove voter accounts"
+msgstr ""
+
+#: msv-magic-link-auth.php:2328
+msgid "Permanently deletes WordPress accounts. Choose which accounts count as \"voters\" below, then use the manual button or an automatic schedule to remove them once you no longer need their accounts (for example, after voting has fully closed)."
+msgstr ""
+
+#: msv-magic-link-auth.php:2332
+msgid "Which accounts to delete"
+msgstr ""
+
+#. translators: %d: number of matching accounts
+#: msv-magic-link-auth.php:2339
+#, php-format
+msgid "Every account whose only role is Subscriber (%d account(s)). Never touches administrators, editors, or any other multi-role account. Includes accounts that already existed before this feature was added."
+msgstr ""
+
+#. translators: %d: number of matching accounts
+#: msv-magic-link-auth.php:2349
+#, php-format
+msgid "Only accounts this plugin itself created (%d account(s)). Safer on a site that also uses the Subscriber role for other members, but cannot include accounts created before this feature was added."
+msgstr ""
+
+#: msv-magic-link-auth.php:2368
+msgid "Remove voter accounts now"
+msgstr ""
+
+#: msv-magic-link-auth.php:2371
 msgid "Automatic deletion schedule"
 msgstr ""
 
-#: msv-magic-link-auth.php:2349
+#: msv-magic-link-auth.php:2378
 msgid "When to delete automatically"
 msgstr ""
 
-#: msv-magic-link-auth.php:2355
+#. translators: 1: database table name, 2: number of rows currently storing an IP address
+#: msv-magic-link-auth.php:2391
+#, php-format
+msgid "Detected table %1$s — %2$d entries currently store an IP address."
+msgstr ""
+
+#: msv-magic-link-auth.php:2397
+msgid "No matching table/column found - TotalPoll Pro may not be installed, or uses a different table/column name. The button below is disabled until a match is found."
+msgstr ""
+
+#: msv-magic-link-auth.php:2401
+msgid "TotalPoll log table"
+msgstr ""
+
+#: msv-magic-link-auth.php:2401
+msgid "Enter it without your site's table prefix."
+msgstr ""
+
+#: msv-magic-link-auth.php:2405
+msgid "IP column name"
+msgstr ""
+
+#: msv-magic-link-auth.php:2415
+msgid "Run checks now"
+msgstr ""
+
+#: msv-magic-link-auth.php:2420
+msgid "WP-Cron is disabled on this site (DISABLE_WP_CRON in wp-config.php), so automatic schedules cannot run. The manual buttons on this tab still work normally."
+msgstr ""
+
+#: msv-magic-link-auth.php:2421
+msgid "Learn how to enable WP-Cron"
+msgstr ""
+
+#: msv-magic-link-auth.php:2434
 msgid "Log retention"
 msgstr ""
 
-#: msv-magic-link-auth.php:2358
+#: msv-magic-link-auth.php:2437
 msgid "Keep log entries for (days)"
 msgstr ""
 
-#: msv-magic-link-auth.php:2367
+#: msv-magic-link-auth.php:2451
 msgid "Recent log"
 msgstr ""
 
-#: msv-magic-link-auth.php:2369
+#: msv-magic-link-auth.php:2453
 msgid "No log entries yet."
 msgstr ""
 
-#: msv-magic-link-auth.php:2374
+#: msv-magic-link-auth.php:2458
 msgid "Time"
 msgstr ""
 
-#: msv-magic-link-auth.php:2375
+#: msv-magic-link-auth.php:2459
 msgid "Level"
 msgstr ""
 
-#: msv-magic-link-auth.php:2376
+#: msv-magic-link-auth.php:2460
 msgid "Message"
 msgstr ""
 
-#: msv-magic-link-auth.php:2392
+#: msv-magic-link-auth.php:2476
 msgid "Clear log"
 msgstr ""
 
-#: msv-magic-link-auth.php:2548
+#: msv-magic-link-auth.php:2730
 msgid "Magic Link Auth"
 msgstr ""
