@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.9.2
+ * Version: 0.9.3
  * Requires at least: 6.0
  * Requires PHP: 8.4
  * Text Domain: msv-magic-link-auth
@@ -1609,6 +1609,24 @@ final class MSV_Magic_Link_Auth {
     }
 
     /**
+     * Shared "shown X of Y" trailer line for a capped preview list in the
+     * destructive-action confirmation modal - e.g. "Showing all 187 distinct
+     * addresses." or "Showing 200 of 340 distinct addresses." Returns '' when
+     * there's nothing to show at all, so the modal simply omits the trailer.
+     */
+    private function format_preview_trailer(int $shown, int $total, string $noun_plural): string {
+        if ($total === 0) {
+            return '';
+        }
+        if ($shown >= $total) {
+            /* translators: 1: total number of items (all of which are shown), 2: plural noun describing the items */
+            return sprintf(__('Showing all %1$d %2$s.', 'msv-magic-link-auth'), $total, $noun_plural);
+        }
+        /* translators: 1: number of items shown, 2: total number of items, 3: plural noun describing the items */
+        return sprintf(__('Showing %1$d of %2$d %3$s.', 'msv-magic-link-auth'), $shown, $total, $noun_plural);
+    }
+
+    /**
      * Locates TotalPoll Pro's raw vote-log table (holds voter IP + user
      * agent per vote action, separate from the aggregate vote-count table).
      * The table prefix always comes from $wpdb->prefix - never hardcoded -
@@ -1652,6 +1670,34 @@ final class MSV_Magic_Link_Auth {
         global $wpdb;
         $column = preg_replace('/[^a-zA-Z0-9_]/', '', $ip_column);
         return (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table` WHERE `$column` IS NOT NULL AND `$column` != ''");
+    }
+
+    /**
+     * Fresh, deduplicated preview of which IP addresses are actually on file -
+     * used by the confirmation modal so an admin can review real addresses
+     * (not just a count) before clearing them. Same rows can carry the same
+     * IP many times over, so this returns DISTINCT addresses rather than one
+     * line per row - a wall of duplicates wouldn't be a useful review. Follows
+     * the same sanitize-then-interpolate pattern as get_totalpoll_log_table()/
+     * count_totalpoll_ips() for the table/column name; $limit is an actual
+     * value (not an identifier) so it's passed through $wpdb->prepare() as
+     * usual.
+     */
+    private function get_totalpoll_ip_preview(string $table, string $ip_column, int $limit): array {
+        global $wpdb;
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $ip_column);
+
+        $distinct_count = (int) $wpdb->get_var("SELECT COUNT(DISTINCT `$column`) FROM `$table` WHERE `$column` IS NOT NULL AND `$column` != ''");
+
+        $ips = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT `$column` FROM `$table` WHERE `$column` IS NOT NULL AND `$column` != '' ORDER BY `$column` LIMIT %d",
+            $limit
+        ));
+
+        return [
+            'distinct_count' => $distinct_count,
+            'ips' => $ips,
+        ];
     }
 
     /**
@@ -1759,6 +1805,32 @@ final class MSV_Magic_Link_Auth {
 
     private function get_voter_user_ids(string $match_mode): array {
         return $match_mode === 'tag' ? $this->get_voter_user_ids_by_tag() : $this->get_voter_user_ids_by_role();
+    }
+
+    /**
+     * Fresh (uncached) preview of which accounts actually match $match_mode,
+     * for the destructive-action confirmation modal. Deliberately calls
+     * get_voter_user_ids() directly rather than going through the
+     * transient-cached count_voters() - same reasoning as delete_voters()
+     * itself never trusting that cache: showing a stale list right before a
+     * real delete would be worse than showing nothing.
+     */
+    private function get_voter_preview(string $match_mode, int $limit): array {
+        $ids = $this->get_voter_user_ids($match_mode);
+        $total = count($ids);
+
+        $items = [];
+        foreach (array_slice($ids, 0, $limit) as $id) {
+            $user = get_userdata($id);
+            if ($user !== false) {
+                $items[] = $user->user_login . ' <' . $user->user_email . '>';
+            }
+        }
+
+        return [
+            'total' => $total,
+            'items' => $items,
+        ];
     }
 
     /**
@@ -2280,15 +2352,42 @@ final class MSV_Magic_Link_Auth {
                     $totalpoll_table = $this->get_totalpoll_log_table($settings['totalpoll_table_suffix'], $settings['totalpoll_ip_column']);
                     $voter_role_count = $this->count_voters('role');
                     $voter_tag_count = $this->count_voters('tag');
-                    $voter_confirm_role = sprintf(
-                        /* translators: %d: number of matching accounts */
-                        __('This will permanently delete %d account(s) matching "every Subscriber-only account". This cannot be undone. Continue?', 'msv-magic-link-auth'),
-                        $voter_role_count
+
+                    // Confirmation-modal preview data - always fresh queries
+                    // (never the transient-cached counts above), since these
+                    // feed the actual "here's what you're about to remove"
+                    // list an admin reviews right before a destructive action.
+                    $msv_preview_limit = 200;
+
+                    $totalpoll_entry_count = $totalpoll_table !== null ? $this->count_totalpoll_ips($totalpoll_table, $settings['totalpoll_ip_column']) : 0;
+                    $totalpoll_ip_preview = $totalpoll_table !== null
+                        ? $this->get_totalpoll_ip_preview($totalpoll_table, $settings['totalpoll_ip_column'], $msv_preview_limit)
+                        : ['distinct_count' => 0, 'ips' => []];
+                    $totalpoll_preview_description = sprintf(
+                        /* translators: 1: number of log entries with an IP on file, 2: number of distinct IP addresses among them */
+                        __('%1$d entries store an IP address across %2$d distinct addresses. This cannot be undone. Only do this after voting has fully closed.', 'msv-magic-link-auth'),
+                        $totalpoll_entry_count,
+                        $totalpoll_ip_preview['distinct_count']
                     );
-                    $voter_confirm_tag = sprintf(
-                        /* translators: %d: number of matching accounts */
-                        __('This will permanently delete %d account(s) matching "accounts created by this plugin". This cannot be undone. Continue?', 'msv-magic-link-auth'),
-                        $voter_tag_count
+                    $totalpoll_preview_trailer = $this->format_preview_trailer(
+                        count($totalpoll_ip_preview['ips']),
+                        $totalpoll_ip_preview['distinct_count'],
+                        __('distinct addresses', 'msv-magic-link-auth')
+                    );
+
+                    $voter_role_preview = $this->get_voter_preview('role', $msv_preview_limit);
+                    $voter_tag_preview = $this->get_voter_preview('tag', $msv_preview_limit);
+                    $voter_role_description = __('This will permanently delete every account whose only role is Subscriber. This cannot be undone.', 'msv-magic-link-auth');
+                    $voter_tag_description = __('This will permanently delete only the accounts this plugin itself created. This cannot be undone.', 'msv-magic-link-auth');
+                    $voter_role_trailer = $this->format_preview_trailer(
+                        count($voter_role_preview['items']),
+                        $voter_role_preview['total'],
+                        __('matching account(s)', 'msv-magic-link-auth')
+                    );
+                    $voter_tag_trailer = $this->format_preview_trailer(
+                        count($voter_tag_preview['items']),
+                        $voter_tag_preview['total'],
+                        __('matching account(s)', 'msv-magic-link-auth')
                     );
                     ?>
                     <div class="msv-tab-layout">
@@ -2305,8 +2404,8 @@ final class MSV_Magic_Link_Auth {
                             value="1"
                             form="msv-settings-form"
                             class="button"
+                            id="msv-clear-totalpoll-btn"
                             <?php echo $totalpoll_table === null ? 'disabled' : ''; ?>
-                            onclick="return confirm(<?php echo esc_attr(wp_json_encode(__('This will permanently clear all voter IP addresses from the TotalPoll log. This cannot be undone. Only do this after voting has fully closed. Continue?', 'msv-magic-link-auth'))); ?>);"
                         ><?php esc_html_e('Clear TotalPoll voter IPs now', 'msv-magic-link-auth'); ?></button>
                     </p>
 
@@ -2362,8 +2461,6 @@ final class MSV_Magic_Link_Auth {
                             form="msv-settings-form"
                             class="button"
                             id="msv-delete-voters-btn"
-                            data-confirm-role="<?php echo esc_attr($voter_confirm_role); ?>"
-                            data-confirm-tag="<?php echo esc_attr($voter_confirm_tag); ?>"
                             <?php echo ($settings['voter_delete_match_mode'] === 'tag' ? $voter_tag_count : $voter_role_count) === 0 ? 'disabled' : ''; ?>
                         ><?php esc_html_e('Remove voter accounts now', 'msv-magic-link-auth'); ?></button>
                     </p>
@@ -2390,7 +2487,7 @@ final class MSV_Magic_Link_Auth {
                                 /* translators: 1: database table name, 2: number of rows currently storing an IP address */
                                 esc_html__('Detected table %1$s — %2$d entries currently store an IP address.', 'msv-magic-link-auth'),
                                 '<code>' . esc_html($totalpoll_table) . '</code>',
-                                (int) $this->count_totalpoll_ips($totalpoll_table, $settings['totalpoll_ip_column'])
+                                (int) $totalpoll_entry_count
                             );
                             ?>
                         <?php else: ?>
@@ -2481,6 +2578,28 @@ final class MSV_Magic_Link_Auth {
                 </div>
             </div>
 
+            <?php
+            /**
+             * Single reusable confirmation modal shared by both destructive
+             * maintenance actions (TotalPoll IP clear, voter-account delete).
+             * Its content (title/description/item list/trailer) is filled in
+             * by JS from the MSV_MAINTENANCE_PREVIEWS data below, right
+             * before it's shown - see openMsvConfirmModal() further down.
+             */
+            ?>
+            <div class="msv-modal-overlay" id="msv-confirm-modal" hidden>
+                <div class="msv-modal" role="dialog" aria-modal="true" aria-labelledby="msv-confirm-modal-title" aria-describedby="msv-confirm-modal-desc">
+                    <h2 class="msv-modal__title" id="msv-confirm-modal-title"></h2>
+                    <p class="msv-modal__desc" id="msv-confirm-modal-desc"></p>
+                    <ul class="msv-modal__list" id="msv-confirm-modal-list" hidden></ul>
+                    <p class="msv-modal__trailer" id="msv-confirm-modal-trailer" hidden></p>
+                    <div class="msv-modal__actions">
+                        <button type="button" class="button" id="msv-confirm-modal-cancel"><?php esc_html_e('Cancel', 'msv-magic-link-auth'); ?></button>
+                        <button type="button" class="button button-primary" id="msv-confirm-modal-confirm"><?php esc_html_e('Yes, continue', 'msv-magic-link-auth'); ?></button>
+                    </div>
+                </div>
+            </div>
+
             <style>
                 .msv-sticky-header {
                     position: sticky;
@@ -2488,11 +2607,14 @@ final class MSV_Magic_Link_Auth {
                     z-index: 30;
                     background: #fff;
                     /* Full-bleed: cancels WP core's own .wrap margin (10px 20px 0 2px)
+                       AND #wpcontent's own 20px left padding (22px total on the left)
                        so the header spans edge-to-edge like Complianz's, instead of
-                       sitting inside .wrap's normal gutter. Only this header escapes
-                       the gutter - tab content below keeps the normal .wrap margin. */
-                    margin: -10px -20px 0 -2px;
+                       sitting inside the normal gutter. Only this header escapes
+                       the gutter - tab content below keeps the normal inset. */
+                    margin: -10px -20px 0 -22px;
                     padding: 20px 20px 0 22px;
+                    border-bottom: 1px solid #dcdcde;
+                    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
                 }
                 .msv-has-adminbar .msv-sticky-header { top: 32px; }
                 @media screen and (max-width: 782px) {
@@ -2508,7 +2630,7 @@ final class MSV_Magic_Link_Auth {
                     gap: 8px 16px;
                     margin-top: 16px;
                 }
-                .msv-sticky-header__row--nav .nav-tab-wrapper { margin: 0; border-bottom: none; padding: 0; }
+                .msv-sticky-header__row--nav .nav-tab-wrapper { margin: 0; border-bottom: none !important; padding: 0; }
                 .msv-sticky-header__row--nav .nav-tab {
                     background: none;
                     border: none;
@@ -2519,6 +2641,7 @@ final class MSV_Magic_Link_Auth {
                     color: #1d2327;
                     font-weight: 500;
                     box-shadow: none;
+                    cursor: pointer;
                     transition: background-color .15s ease, border-color .15s ease;
                 }
                 .msv-sticky-header__row--nav .nav-tab:hover,
@@ -2591,10 +2714,76 @@ final class MSV_Magic_Link_Auth {
                     z-index: 25;
                 }
                 .msv-tooltip--align-right .msv-tooltip__bubble { left: auto; right: 0; }
+
+                .msv-modal-overlay {
+                    position: fixed;
+                    inset: 0;
+                    background: rgba(0, 0, 0, 0.5);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 20px;
+                    z-index: 100000;
+                }
+                .msv-modal-overlay[hidden] { display: none; }
+                .msv-modal {
+                    background: #fff;
+                    border-radius: 8px;
+                    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+                    max-width: 560px;
+                    width: 100%;
+                    max-height: 80vh;
+                    overflow-y: auto;
+                    padding: 24px;
+                    box-sizing: border-box;
+                }
+                .msv-modal__title { margin-top: 0; }
+                .msv-modal__desc { color: #1d2327; }
+                .msv-modal__list {
+                    max-height: 240px;
+                    overflow-y: auto;
+                    background: #f6f7f7;
+                    border: 1px solid #dcdcde;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                    margin: 12px 0;
+                    font-family: Consolas, Monaco, monospace;
+                    font-size: 12px;
+                    list-style: none;
+                }
+                .msv-modal__list li { padding: 3px 0; word-break: break-all; }
+                .msv-modal__list li + li { border-top: 1px solid #e2e4e7; }
+                .msv-modal__trailer { color: #646970; font-style: italic; margin: 0 0 16px; }
+                .msv-modal__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
             </style>
             <script>
             (function () {
                 var TABS = ['setup', 'email', 'messaging', 'maintenance', 'log'];
+
+                // Preview data for the shared destructive-action confirmation
+                // modal (see openMsvConfirmModal() below) - filled in server-side
+                // from fresh, uncached queries each page load (see
+                // get_totalpoll_ip_preview()/get_voter_preview() in the PHP class).
+                var MSV_MAINTENANCE_PREVIEWS = {
+                    totalpoll: {
+                        title: <?php echo wp_json_encode(__('Clear TotalPoll voter IPs now?', 'msv-magic-link-auth')); ?>,
+                        description: <?php echo wp_json_encode($totalpoll_preview_description); ?>,
+                        items: <?php echo wp_json_encode($totalpoll_ip_preview['ips']); ?>,
+                        trailer: <?php echo wp_json_encode($totalpoll_preview_trailer); ?>
+                    },
+                    voter_role: {
+                        title: <?php echo wp_json_encode(__('Remove voter accounts now?', 'msv-magic-link-auth')); ?>,
+                        description: <?php echo wp_json_encode($voter_role_description); ?>,
+                        items: <?php echo wp_json_encode($voter_role_preview['items']); ?>,
+                        trailer: <?php echo wp_json_encode($voter_role_trailer); ?>
+                    },
+                    voter_tag: {
+                        title: <?php echo wp_json_encode(__('Remove voter accounts now?', 'msv-magic-link-auth')); ?>,
+                        description: <?php echo wp_json_encode($voter_tag_description); ?>,
+                        items: <?php echo wp_json_encode($voter_tag_preview['items']); ?>,
+                        trailer: <?php echo wp_json_encode($voter_tag_trailer); ?>
+                    }
+                };
 
                 function activateTab(tab, skipHistory) {
                     if (TABS.indexOf(tab) === -1) { tab = TABS[0]; }
@@ -2659,7 +2848,52 @@ final class MSV_Magic_Link_Auth {
                     var btn = document.getElementById('msv-delete-voters-btn');
                     var checked = document.querySelector('input[name="voter_delete_match_mode"]:checked');
                     if (!btn || !checked) { return; }
-                    btn.setAttribute('data-confirm-active', btn.getAttribute('data-confirm-' + checked.value) || '');
+                    btn.setAttribute('data-preview-key', checked.value === 'tag' ? 'voter_tag' : 'voter_role');
+                }
+
+                // --- Shared destructive-action confirmation modal ----------------
+                // One modal, reused by both the TotalPoll IP-clear button and the
+                // voter-delete button, parameterized via MSV_MAINTENANCE_PREVIEWS.
+                // Confirming submits the ORIGINAL button (not just the form) via
+                // requestSubmit(), so the button's name=value pair still reaches
+                // $_POST exactly as it would from a real click - see the two
+                // "submitBtn" wire-ups near the end of DOMContentLoaded below.
+                var msvModalTriggerBtn = null;
+
+                function openMsvConfirmModal(previewKey, triggerBtn) {
+                    var data = MSV_MAINTENANCE_PREVIEWS[previewKey];
+                    var overlay = document.getElementById('msv-confirm-modal');
+                    if (!data || !overlay) { return; }
+
+                    document.getElementById('msv-confirm-modal-title').textContent = data.title;
+                    document.getElementById('msv-confirm-modal-desc').textContent = data.description;
+
+                    var list = document.getElementById('msv-confirm-modal-list');
+                    list.innerHTML = '';
+                    data.items.forEach(function (item) {
+                        var li = document.createElement('li');
+                        li.textContent = item;
+                        list.appendChild(li);
+                    });
+                    list.hidden = data.items.length === 0;
+
+                    var trailer = document.getElementById('msv-confirm-modal-trailer');
+                    trailer.textContent = data.trailer;
+                    trailer.hidden = data.trailer === '';
+
+                    closeAllTooltips();
+                    msvModalTriggerBtn = triggerBtn;
+                    overlay.hidden = false;
+                    var cancelBtn = document.getElementById('msv-confirm-modal-cancel');
+                    if (cancelBtn) { cancelBtn.focus(); }
+                }
+
+                function closeMsvConfirmModal() {
+                    var overlay = document.getElementById('msv-confirm-modal');
+                    if (!overlay || overlay.hidden) { return; }
+                    overlay.hidden = true;
+                    if (msvModalTriggerBtn) { msvModalTriggerBtn.focus(); }
+                    msvModalTriggerBtn = null;
                 }
 
                 document.addEventListener('DOMContentLoaded', function () {
@@ -2697,19 +2931,84 @@ final class MSV_Magic_Link_Auth {
                         });
                     });
                     document.addEventListener('click', function () { closeAllTooltips(); });
-                    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeAllTooltips(); } });
+                    document.addEventListener('keydown', function (e) {
+                        var openModal = document.getElementById('msv-confirm-modal');
+                        var modalIsOpen = !!(openModal && !openModal.hidden);
+
+                        // Minimal focus trap: while the modal is open, Tab/Shift+Tab
+                        // only ever cycles between its two buttons (Cancel/Confirm),
+                        // never escaping out to the page behind it.
+                        if (modalIsOpen && e.key === 'Tab') {
+                            var focusables = [
+                                document.getElementById('msv-confirm-modal-cancel'),
+                                document.getElementById('msv-confirm-modal-confirm')
+                            ];
+                            var index = focusables.indexOf(document.activeElement);
+                            e.preventDefault();
+                            var nextIndex;
+                            if (e.shiftKey) {
+                                nextIndex = index <= 0 ? focusables.length - 1 : index - 1;
+                            } else {
+                                nextIndex = index === focusables.length - 1 ? 0 : index + 1;
+                            }
+                            focusables[nextIndex].focus();
+                            return;
+                        }
+
+                        if (e.key !== 'Escape') { return; }
+                        if (modalIsOpen) {
+                            // Modal takes priority over tooltip popovers so the two
+                            // Escape handlers never fight over focus at the same time.
+                            closeMsvConfirmModal();
+                            return;
+                        }
+                        closeAllTooltips();
+                    });
 
                     document.querySelectorAll('input[name="voter_delete_match_mode"]').forEach(function (radio) {
                         radio.addEventListener('change', syncDeleteVotersButton);
                     });
                     syncDeleteVotersButton();
+
+                    var settingsForm = document.getElementById('msv-settings-form');
+
+                    var clearIpsBtn = document.getElementById('msv-clear-totalpoll-btn');
+                    if (clearIpsBtn) {
+                        clearIpsBtn.addEventListener('click', function (e) {
+                            e.preventDefault();
+                            openMsvConfirmModal('totalpoll', clearIpsBtn);
+                        });
+                    }
+
                     var deleteVotersBtn = document.getElementById('msv-delete-voters-btn');
                     if (deleteVotersBtn) {
                         deleteVotersBtn.addEventListener('click', function (e) {
-                            var message = deleteVotersBtn.getAttribute('data-confirm-active');
-                            if (message && !confirm(message)) {
-                                e.preventDefault();
+                            e.preventDefault();
+                            var previewKey = deleteVotersBtn.getAttribute('data-preview-key') || 'voter_role';
+                            openMsvConfirmModal(previewKey, deleteVotersBtn);
+                        });
+                    }
+
+                    var modalCancelBtn = document.getElementById('msv-confirm-modal-cancel');
+                    if (modalCancelBtn) {
+                        modalCancelBtn.addEventListener('click', closeMsvConfirmModal);
+                    }
+                    var modalConfirmBtn = document.getElementById('msv-confirm-modal-confirm');
+                    if (modalConfirmBtn) {
+                        modalConfirmBtn.addEventListener('click', function () {
+                            var submitBtn = msvModalTriggerBtn;
+                            var overlay = document.getElementById('msv-confirm-modal');
+                            if (overlay) { overlay.hidden = true; }
+                            msvModalTriggerBtn = null;
+                            if (submitBtn && settingsForm) {
+                                settingsForm.requestSubmit(submitBtn);
                             }
+                        });
+                    }
+                    var modalOverlay = document.getElementById('msv-confirm-modal');
+                    if (modalOverlay) {
+                        modalOverlay.addEventListener('click', function (e) {
+                            if (e.target === modalOverlay) { closeMsvConfirmModal(); }
                         });
                     }
 

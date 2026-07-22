@@ -3,7 +3,7 @@ Contributors: igor@igibits.com
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.4
-Stable tag: 0.9.2
+Stable tag: 0.9.3
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -57,6 +57,11 @@ Yes, on the Messaging tab. Every message shown to a visitor is editable, and if 
 In the WordPress options table, under option names prefixed `msv_magic_link_auth_`. Deleting the plugin (not just deactivating it) removes all of it, including any stored magic-link tokens and rate-limit counters.
 
 == Changelog ==
+
+= 0.9.3 =
+* The "Clear TotalPoll voter IPs now" and "Remove voter accounts now" buttons now open a review popup listing the actual IP addresses / accounts that will be affected (capped at 200, with a "showing X of Y" note), instead of just a count-only browser confirm dialog.
+* Settings header now has a subtle bottom border and shadow, matching the card style used elsewhere on the page.
+* Fixed the settings header still leaving a gap on its left edge in some admin themes, a leftover gray line under the tab row, and tab buttons not showing a pointer cursor on hover.
 
 = 0.9.2 =
 * Settings header is now full-width (edge-to-edge, no gutter), matching the rest of the redesigned admin UI.

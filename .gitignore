@@ -1,6 +1,6 @@
 /vendor/
 .DS_Store
-/msv-magic-link-auth.zip
+/wp-magic-link-auth.zip
 /.claude/
 /.vscode/
 /HANDOFF.md
