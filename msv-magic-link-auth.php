@@ -3,7 +3,7 @@
  * Plugin Name: WP Magic Link Auth
  * Description: Passwordless magic-link authentication with rate limiting, an optional protected page, Cloudflare Turnstile support, and a disposable-email blocklist. Works via a shortcode or an Elementor Pro form action.
  * Author: igor@igibits.com
- * Version: 0.9.1
+ * Version: 0.9.2
  * Requires at least: 6.0
  * Requires PHP: 8.4
  * Text Domain: msv-magic-link-auth
@@ -2487,8 +2487,12 @@ final class MSV_Magic_Link_Auth {
                     top: 0;
                     z-index: 30;
                     background: #fff;
-                    padding: 16px 20px 0;
-                    border-bottom: 1px solid #dcdcde;
+                    /* Full-bleed: cancels WP core's own .wrap margin (10px 20px 0 2px)
+                       so the header spans edge-to-edge like Complianz's, instead of
+                       sitting inside .wrap's normal gutter. Only this header escapes
+                       the gutter - tab content below keeps the normal .wrap margin. */
+                    margin: -10px -20px 0 -2px;
+                    padding: 20px 20px 0 22px;
                 }
                 .msv-has-adminbar .msv-sticky-header { top: 32px; }
                 @media screen and (max-width: 782px) {
@@ -2502,9 +2506,32 @@ final class MSV_Magic_Link_Auth {
                     justify-content: space-between;
                     flex-wrap: wrap;
                     gap: 8px 16px;
-                    margin-top: 8px;
+                    margin-top: 16px;
                 }
-                .msv-sticky-header__row--nav .nav-tab-wrapper { margin: 0; border-bottom: none; }
+                .msv-sticky-header__row--nav .nav-tab-wrapper { margin: 0; border-bottom: none; padding: 0; }
+                .msv-sticky-header__row--nav .nav-tab {
+                    background: none;
+                    border: none;
+                    border-bottom: 2px solid transparent;
+                    border-radius: 0;
+                    margin: 0 4px 0 0;
+                    padding: 10px 12px;
+                    color: #1d2327;
+                    font-weight: 500;
+                    box-shadow: none;
+                    transition: background-color .15s ease, border-color .15s ease;
+                }
+                .msv-sticky-header__row--nav .nav-tab:hover,
+                .msv-sticky-header__row--nav .nav-tab:focus {
+                    background: rgba(0, 0, 0, 0.04);
+                    color: #1d2327;
+                }
+                .msv-sticky-header__row--nav .nav-tab-active,
+                .msv-sticky-header__row--nav .nav-tab-active:hover,
+                .msv-sticky-header__row--nav .nav-tab-active:focus {
+                    background: none;
+                    border-bottom-color: #2271b1;
+                }
                 .msv-sticky-header__actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
                 .msv-card {

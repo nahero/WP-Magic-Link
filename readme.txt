@@ -3,7 +3,7 @@ Contributors: igor@igibits.com
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.4
-Stable tag: 0.9.1
+Stable tag: 0.9.2
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -57,6 +57,10 @@ Yes, on the Messaging tab. Every message shown to a visitor is editable, and if 
 In the WordPress options table, under option names prefixed `msv_magic_link_auth_`. Deleting the plugin (not just deactivating it) removes all of it, including any stored magic-link tokens and rate-limit counters.
 
 == Changelog ==
+
+= 0.9.2 =
+* Settings header is now full-width (edge-to-edge, no gutter), matching the rest of the redesigned admin UI.
+* Flattened the tab bar: idle tabs have no border/background, a subtle hover tint, and the active tab shows only a colored bottom border. Removed the divider line below the tab row.
 
 = 0.9.1 =
 * Redesigned the settings screen: white rounded cards, a two-row sticky header (title above, tabs and Save/Update aligned on one row), and help-icon tooltips in place of many inline descriptions.
